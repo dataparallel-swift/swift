@@ -384,7 +384,7 @@ void LinkInHostSupportCode(Module &M, LLVMContext &Context)
 
   // Copy over the contents of the module directly. Linker::linkModules() will
   // only copy what is needed---which at this point is nothing. Thanks A LOT
-  // linkModules().
+  // linkModules(), THANKS. A. LOT.
   //
   // Build the VMap table as we go, which we'll need for CloneFunctionInto().
   ValueToValueMapTy VMap;
@@ -518,9 +518,10 @@ public:
 //
 // XXX: In principle we should create this in a separate LLVMContext (it is an
 // entirely separate module with a different target architecture) but copying
-// the functions over will require more work because their types still refer to
-// the context of the source module. If we cleanly separate this we should be
-// able to compile multiple units concurrently, which could be useful.
+// the functions over will require more work because their types, attributes,
+// and other metadata etc. still refer to the context of the source module. If
+// we cleanly separate this we should be able to compile multiple units
+// concurrently, which could be useful.
 //
 SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVMContext& Context)
 {
@@ -607,11 +608,9 @@ SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVM
   // to e.g. remove generic type parameters.
   Function *Body = M->getFunction("body");
   assert(Body->hasOneUser() && "expected only one call to the kernel body");
-  for (auto U : Body->users()) {
-    if (CallInst *CI = dyn_cast<CallInst>(U)) {
-      CI->setCalledOperand(M->getFunction(Main));
-    }
-  }
+  assert(isa<CallInst>(Body->getUniqueUndroppableUser()));
+  CallInst *CI = dyn_cast<CallInst>(Body->getUniqueUndroppableUser());
+  CI->setCalledOperand(M->getFunction(Main));
 
   // Create a target machine for the Orin
   std::string Error;
@@ -692,7 +691,9 @@ SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVM
 }
 
 // Update the environment so that its contents is accessible from in
-// device memory.
+// device memory. This is the recursive overload of UpdateClosureEnvironment()
+// that does all the work; the other overload is the one is the entry point that
+// does the setup and finalisation work.
 //
 // This is perhaps the most tedious part of the entire operation. There
 // are a few different cases to handle:
@@ -770,7 +771,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P, SmallVe
           ToFree.erase(NewI);
 
           // Safe to erase these directly since users() will not be iterating
-          // over them. XXX Note that the order is important here,
+          // over them. XXX: The order is important here
           Restore->eraseFromParent();
           Save->eraseFromParent();
         }
@@ -840,6 +841,10 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P, SmallVe
   LLVM_DEBUG(dbgs() << "UpdateClosureEnvironment: unhandled instruction: " << *P << "\n");
 }
 
+// This is the entry point to UpdateClosureEnvironment(). This handles some
+// setup and finalisation. The other overload of this function is the recursive
+// one that does all the hard work.
+//
 void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P)
 {
   SmallVector<Instruction*> ToErase;
@@ -918,12 +923,14 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
   IntegerType* i32_t = IntegerType::getInt32Ty(Context);
   StructType* kernel_t = StructType::create(Context, {ptr_t, ptr_t, ptr_t, i32_t, i32_t}, "parallel_for_kernel_t");
 
-  // Iterate over all uses of the `parallel_for` function
+  // Iterate over all uses of the `parallel_for(iterations: body:)` function
   for (auto U = Fseq->user_begin(), UE = Fseq->user_end(); U != UE; /* See: [1] */) {
     if (CallInst *CI = dyn_cast<CallInst>(*U)) {
-      Value* K = CI->getArgOperand(1);
-      GlobalValue* G = dyn_cast<GlobalValue>(K);
+      Value* Iterations = CI->getArgOperand(0);
+      Value* Body = CI->getArgOperand(1);
+      Value* Env = CI->getArgOperand(2);
 
+      GlobalValue* G = dyn_cast<GlobalValue>(Body);
       if (!G) {
         // TODO: We should be able to handle other forms; occasionally the
         // continuation will be passed as part of the closure environment and we
@@ -961,7 +968,7 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
 
       // Generate PTX assembly for the (set of) functions called by the
       // `parallel_for` launcher, and embed the generated code into the module
-      SmallVector<char> Asm = CreateKernel(K->getName(), GVs, Context);
+      SmallVector<char> Asm = CreateKernel(Body->getName(), GVs, Context);
       size_t buffer_size = Asm.size() + 1;  // include space for null terminator
       IntegerType* i8_t = IntegerType::getInt8Ty(Context);
       ArrayType* image_t = ArrayType::get(i8_t, buffer_size);
@@ -973,7 +980,7 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
       GlobalVariable* Image = new GlobalVariable(M, image_t, true,
           GlobalValue::InternalLinkage,
           ConstantArray::get(image_t, ArrayRef(KernelData)),
-          K->getName() + "$image");  // XXX this will need to get more complicated as we do more specialisation
+          Body->getName() + "$image");  // XXX this will need to get more complicated as we do more specialisation
       Image->setAlignment(Align(1));
       Image->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
 
@@ -982,7 +989,7 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
       GlobalVariable* Kernel = new GlobalVariable(M, kernel_t, false,
           GlobalValue::InternalLinkage,
           ConstantStruct::get(kernel_t, {Image, nullptr_c, nullptr_c , zero_c, zero_c}),
-          K->getName() + "$kernel");
+          Body->getName() + "$kernel");
       Kernel->setAlignment(Align(8));
       Kernel->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
 
@@ -994,8 +1001,7 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
       // Update the calling instruction to our placeholder `parallel_for` to our
       // kernel launcher. This assumes that the environment is set up correctly,
       // which we will do in the next step.
-      Value* Env = CI->getArgOperand(2);
-      std::vector<Value*> params = {CI->getArgOperand(0), Kernel, Env, nullptr_c};
+      std::vector<Value*> params = {Iterations, Kernel, Env, nullptr_c};
       CallInst* CIpar = CallInst::Create(Fpar->getFunctionType(), Fpar, params);
       CIpar->addParamAttr(1, Attribute::NonNull);
       CIpar->addParamAttr(2, Attribute::NonNull);
