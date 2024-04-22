@@ -49,6 +49,14 @@ static cl::opt<bool> KeepIntermediateFiles (
   "lift-to-ptx-keep-intermediate-files", cl::Hidden, cl::init(false),
   cl::desc("Keep intermediate files of lift-to-ptx pass"));
 
+static cl::opt<StringRef> TargetGPU (
+  "lift-to-ptx-target-gpu", cl::Hidden, cl::init("sm_87"),  // default: Orin
+  cl::desc("Target a specific GPU architecture in lift-to-ptx pass"));
+
+static cl::opt<StringRef> TargetFeatures (
+  "lift-to-ptx-target-attr", cl::Hidden, cl::init(""),
+  cl::desc("Target specific attributes in lift-to-ptx pass"));
+
 static const MemoryBufferRef parallel_for_kernel = MemoryBufferRef(R"KERNEL(
 ; ModuleID = '<parallel_for_kernel>'
 target datalayout = "e-i64:64-v16:16-v32:32-n16:32:64"
@@ -612,17 +620,15 @@ SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVM
   CallInst *CI = dyn_cast<CallInst>(Body->getUniqueUndroppableUser());
   CI->setCalledOperand(M->getFunction(Main));
 
-  // Create a target machine for the Orin
+  // Create a target machine
   std::string Error;
   auto TargetTriple = "nvptx64-nvidia-cuda";
-  auto CPU = "sm_87";
-  auto Features = "";
   auto Target = TargetRegistry::lookupTarget(TargetTriple, Error);
   if (!Target) {
     report_fatal_error(StringRef(Error), false);
   }
   TargetOptions opt;
-  TargetMachine* TargetMachine = Target->createTargetMachine(TargetTriple, CPU, Features, opt, Reloc::PIC_);
+  TargetMachine* TargetMachine = Target->createTargetMachine(TargetTriple, TargetGPU, TargetFeatures, opt, Reloc::PIC_);
   M->setDataLayout(TargetMachine->createDataLayout());
 
   // Run a full optimisation pass on this module
