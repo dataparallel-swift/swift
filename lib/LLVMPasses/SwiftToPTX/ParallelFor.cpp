@@ -116,105 +116,71 @@ attributes #2 = { nounwind readnone }
 
 static const MemoryBufferRef host_support = MemoryBufferRef(R"HOST(
 ; ModuleID = '<host_support>'
-source_filename = "<host_support>"
+target datalayout = "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128"
+target triple = "aarch64-unknown-linux-gnu"
 
-%struct.parallel_for_kernel_t = type { ptr, ptr, ptr, i32, i32 }
+%TSP = type <{ ptr }>
+%Ts5Int32V = type <{ i32 }>
+%Ts13OpaquePointerV = type <{ ptr }>
+%Ts13OpaquePointerVSg = type <{ [8 x i8] }>
+%T10SwiftToPTX17ParallelForKernelV = type <{ %TSP, %Ts13OpaquePointerVSg, %Ts13OpaquePointerV, %Ts5Int32V, %Ts5Int32V }>
 
-@stderr = external local_unnamed_addr global ptr, align 8
-@.str = private unnamed_addr constant [41 x i8] c"CUDA call failed with error %s (%d): %s\0A\00", align 1
+; SwiftToPTX.CachingHostAllocator.alloc(Swift.Int) -> Swift.UnsafeMutableRawPointer
+declare swiftcc ptr @"$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF"(i64, ptr, ptr, ptr) local_unnamed_addr #0
+;                                                                         │    ╰────┬────╯
+;                                                                         │         ╰───────── caching host allocator state
+;                                                                         ╰─────────────────── size in bytes
 
-; Function Attrs: nounwind uwtable
-define internal fastcc void @cuda_safe_call(i32 noundef %result) unnamed_addr #0 {
-entry:
-  %name = alloca ptr, align 8
-  %desc = alloca ptr, align 8
-  %cmp.not = icmp eq i32 %result, 0
-  br i1 %cmp.not, label %if.end, label %if.then
+; SwiftToPTX.CachingHostAllocator.free(Swift.UnsafeMutableRawPointer, SwiftToPTX.Event) -> ()
+declare swiftcc void @"$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventVtF"(ptr, ptr, ptr, ptr, ptr) local_unnamed_addr #0
+;                                                                                   │    │    ╰────┬────╯
+;                                                                                   │    │         ╰───────── caching host allocator state
+;                                                                                   │    ╰─────────────────── ready event
+;                                                                                   ╰──────────────────────── pointer to free
 
-if.then:                                          ; preds = %entry
-  call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %name) #5
-  call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %desc) #5
-  %call = call i32 @cuGetErrorName(i32 noundef %result, ptr noundef nonnull %name) #5
-  %call1 = call i32 @cuGetErrorString(i32 noundef %result, ptr noundef nonnull %desc) #5
-  %0 = load ptr, ptr @stderr, align 8, !tbaa !5
-  %1 = load ptr, ptr %name, align 8, !tbaa !5
-  %2 = load ptr, ptr %desc, align 8, !tbaa !5
-  %call2 = call i32 (ptr, ptr, ...) @fprintf(ptr noundef %0, ptr noundef nonnull @.str, ptr noundef %1, i32 noundef %result, ptr noundef %2) #6
-  call void @exit(i32 noundef 1) #7
-  unreachable
+; SwiftToPTX.parallel_for(iterations: Swift.Int, context: SwiftToPTX.Context, allocator: SwiftToPTX.CachingHostAllocator, stream: SwiftToPTX.Stream, _: (Swift.Int) -> ()) -> SwiftToPTX.Event
+declare swiftcc ptr @"$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventVSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtF"(i64, ptr, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr) local_unnamed_addr #0
+;                                                                                                                                                           │     ╰────┬────╯   ╰────┬────╯    │    │    ╰──── eclosure nvironment
+;                                                                                                                                                           │          │             │         │    ╰───────── body of the parallel_for loop
+;                                                                                                                                                           │          │             │         ╰────────────── exeution stream
+;                                                                                                                                                           │          │             ╰──────────────────────── caching host allocator state
+;                                                                                                                                                           │          ╰────────────────────────────────────── CUDA context state
+;                                                                                                                                                           ╰───────────────────────────────────────────────── pointer to free
 
-if.end:                                           ; preds = %entry
-  ret void
-}
+; SwiftToPTX.launch_parallel_for(iterations: Swift.Int, kernel: inout SwiftToPTX.ParallelForKernel, env: Swift.UnsafeMutableRawPointer, context: SwiftToPTX.Context, stream: SwiftToPTX.Stream) -> SwiftToPTX.Event
+declare swiftcc ptr @"$s10SwiftToPTX19launch_parallel_for10iterations6kernel3env7context6streamAA5EventVSi_AA17ParallelForKernelVzSvAA7ContextVAA6StreamVtF"(i64, ptr nocapture dereferenceable(32), ptr, ptr, i64, i64, ptr) local_unnamed_addr #0
+;                                                                                                                                                             │    │                                  │    ╰────┬────╯    ╰──── closure environment (updated to be GPU accessible)
+;                                                                                                                                                             │    │                                  │         ╰────────────── CUDA context state
+;                                                                                                                                                             │    │                                  ╰──────────────────────── closure environment
+;                                                                                                                                                             │    ╰─────────────────────────────────────────────────────────── ParallelForKernel struct
+;                                                                                                                                                             ╰──────────────────────────────────────────────────────────────── iterations
 
-; Function Attrs: nounwind uwtable
-define internal fastcc ptr @cuda_caching_alloc_host(i64 noundef %bytes) local_unnamed_addr #0 {
-entry:
-  %ptr = alloca ptr, align 8
-  call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %ptr) #5
-  %call = call i32 @cuMemAllocHost_v2(ptr noundef nonnull %ptr, i64 noundef %bytes) #5
-  call fastcc void @cuda_safe_call(i32 noundef %call)
-  %0 = load ptr, ptr %ptr, align 8, !tbaa !5
-  call void @llvm.lifetime.end.p0(i64 8, ptr nonnull %ptr) #5
-  ret ptr %0
-}
+; SwiftToPTX.getDevicePointer<A>(Swift.UnsafeMutablePointer<A>, Swift.Int) -> Swift.UInt64
+declare swiftcc i64 @"$s10SwiftToPTX16getDevicePointerys6UInt64VSpyxG_SitlF"(ptr, i64, ptr nocapture readonly) local_unnamed_addr #0
+;                                                                             │    │    ╰──── swift type dictionary
+;                                                                             │    ╰───────── count
+;                                                                             ╰────────────── pointer
 
-; Function Attrs: nounwind uwtable
-define internal fastcc void @cuda_caching_free_host(ptr noundef %ptr) local_unnamed_addr #0 {
-entry:
-  %call = tail call i32 @cuMemFreeHost(ptr noundef %ptr) #5
-  tail call fastcc void @cuda_safe_call(i32 noundef %call)
-  ret void
-}
+; SwiftToPTX.getDevicePointer(Swift.UnsafeMutableRawPointer, Swift.Int, Swift.Int) -> Swift.UInt64
+declare swiftcc i64 @"$s10SwiftToPTX16getDevicePointerys6UInt64VSv_S2itF"(ptr, i64, i64) local_unnamed_addr #1
+;                                                                          │    │    ╰──── stride
+;                                                                          │    ╰───────── count
+;                                                                          ╰────────────── pointer
 
-declare ptr @launch_parallel_for(i64, ptr nonnull, ptr nonnull, ptr)
 
-declare i32 @cuMemHostRegister_v2(ptr noundef, i64 noundef, i32 noundef) local_unnamed_addr #1
+attributes #0 = { "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
+attributes #1 = { sspreq "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
 
-declare i32 @cuMemHostGetDevicePointer_v2(ptr noundef, ptr noundef, i32 noundef) local_unnamed_addr #1
+!llvm.module.flags = !{!0, !1, !2, !3, !4, !5, !6, !7}
 
-declare i32 @cuMemAllocHost_v2(ptr noundef, i64 noundef) local_unnamed_addr #1
-
-declare i32 @cuMemHostUnregister(ptr noundef) local_unnamed_addr #1
-
-declare i32 @cuMemFreeHost(ptr noundef) local_unnamed_addr #1
-
-declare i32 @cuGetErrorName(i32 noundef, ptr noundef) local_unnamed_addr #1
-
-declare i32 @cuGetErrorString(i32 noundef, ptr noundef) local_unnamed_addr #1
-
-; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
-declare void @llvm.lifetime.start.p0(i64 immarg, ptr nocapture) #2
-
-; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
-declare void @llvm.lifetime.end.p0(i64 immarg, ptr nocapture) #2
-
-; Function Attrs: nofree nounwind
-declare noundef i32 @fprintf(ptr nocapture noundef, ptr nocapture noundef readonly, ...) local_unnamed_addr #3
-
-; Function Attrs: noreturn nounwind
-declare void @exit(i32 noundef) local_unnamed_addr #4
-
-attributes #0 = { nounwind uwtable "frame-pointer"="non-leaf" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
-attributes #1 = { "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
-attributes #2 = { nocallback nofree nosync nounwind willreturn memory(argmem: readwrite) }
-attributes #3 = { nofree nounwind "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
-attributes #4 = { noreturn nounwind "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
-attributes #5 = { nounwind }
-attributes #6 = { cold }
-attributes #7 = { noreturn nounwind }
-
-!llvm.module.flags = !{!0, !1, !2, !3, !4}
-
-!0 = !{i32 1, !"wchar_size", i32 4}
-!1 = !{i32 8, !"PIC Level", i32 2}
-!2 = !{i32 7, !"PIE Level", i32 2}
-!3 = !{i32 7, !"uwtable", i32 2}
-!4 = !{i32 7, !"frame-pointer", i32 1}
-!5 = !{!6, !6, i64 0}
-!6 = !{!"any pointer", !7, i64 0}
-!7 = !{!"omnipotent char", !8, i64 0}
-!8 = !{!"Simple C/C++ TBAA"}
+!0 = !{i32 7, !"Dwarf Version", i32 4}
+!1 = !{i32 2, !"Debug Info Version", i32 3}
+!2 = !{i32 1, !"wchar_size", i32 4}
+!3 = !{i32 8, !"PIC Level", i32 2}
+!4 = !{i32 7, !"uwtable", i32 2}
+!5 = !{i32 7, !"frame-pointer", i32 1}
+!6 = !{i32 4, !"Objective-C Garbage Collection", i32 84477696}
+!7 = !{i32 1, !"Swift Version", i32 7}
 )HOST", "<host_support>");
 
 
@@ -325,8 +291,8 @@ const StringMap<StringRef> libdeviceFunctions =
 //
 const Twine LocateLibdeviceFile()
 {
-  return "libdevice.10.bc";
-  /* return "/usr/local/cuda/nvvm/libdevice/libdevice.10.bc"; */
+  /* return "libdevice.10.bc"; */
+  return "/usr/local/cuda/nvvm/libdevice/libdevice.10.bc";
 }
 
 
@@ -696,37 +662,34 @@ SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVM
   return Asm;
 }
 
-// Update the environment so that its contents is accessible from in
-// device memory. This is the recursive overload of UpdateClosureEnvironment()
-// that does all the work; the other overload is the one is the entry point that
-// does the setup and finalisation work.
+// Swift will apply scalar replacement of aggregates in order to pass struct
+// (components) in registers for function calls.
+struct SORA3 {
+  Value* _0;
+  Value* _1;
+  Value* _2;
+};
+typedef struct SORA3 CachingHostAllocator;
+
+// Update the environment so that its contents are accessible from the device.
+// This is the recursive overload of UpdateClosureEnvironment() that does all
+// the work; the other overload is the one is the entry point that does the
+// setup and finalisation work.
 //
-// This is perhaps the most tedious part of the entire operation. There
-// are a few different cases to handle:
+// This is perhaps the most tedious part of the entire operation. There are a
+// few different cases to handle:
 //
-//   1. alloca instructions (temporary allocations on the stack) are
-//      converted into a allocation using cuMemAllocHost(), which must
-//      then be deallocated once the kernel completes.
+//   1. alloca instructions (temporary allocations on the stack) are converted
+//      into a allocation using cuMemAllocHost(), which must then be deallocated
+//      once the kernel completes.
 //
-//      XXX: Currently this memory is never freed. cuLaunchHostFunc() is
-//      the obvious choice for freeing this memory, but can
-//      not call CUDA API functions (i.e. cuMemFreeHost()). The stream
-//      ordered memory allocator can only allocate device memory (i.e. can
-//      not be used for unified memory allocations).
+//      This is handled by CachingHostAllocator in the swift-to-ptx support
+//      library, which provides a cached block allocator for pinned host memory.
 //
-//      Additionally, since cuMemAllocHost() is relatively expensive (it
-//      must allocate page-locked memory, thus calls into the kernel)
-//      we'll implement our own small block caching allocator. Allocations
-//      will take a block from the free list if available, otherwise
-//      actually allocate a block, and deallocations return the block the
-//      the free list, thus avoiding an API call.
-//
-//      e.g. https://nvidia.github.io/cccl/cub/api/program_listing_file_cub_util_allocator.cuh.html
-//
-//   2. TODO: Regular pointers must be made accessible to the device via
+//   2. Regular pointers must be made accessible to the device via
 //      cuMemHostGetDevicePointer(), and that address substituted into the
-//      environment instead. The main difficulty here is that we need to
-//      know the size of the allocation.
+//      environment instead. The main difficulty here is that we need to know
+//      the size of the allocation.
 //
 //      XXX: It might be better that at the Swift layer we provide our own Array
 //      type/extension that always allocated into pinned memory, so that the
@@ -737,7 +700,7 @@ SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVM
 // of indirection.
 //
 template <unsigned N>
-void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P, SmallVector<Instruction*> &ToErase, SmallPtrSet<Value*, N> &ToFree)
+void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CachingHostAllocator Allocator, Value* Event, SmallVector<Instruction*>& ToErase, SmallPtrSet<Value*, N>& ToFree)
 {
   if (AllocaInst* I = dyn_cast<AllocaInst>(P)) {
     auto TypeSize = I->getAllocationSize(M.getDataLayout());
@@ -755,9 +718,9 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P, SmallVe
     //
     IntegerType *i64_t = IntegerType::getInt64Ty(Context);
     ConstantInt *size = ConstantInt::get(i64_t, TypeSize->getFixedValue());
-    Function *F = M.getFunction("cuda_caching_alloc_host");
-    CallInst *NewI = CallInst::Create(F->getFunctionType(), F, {size});
-    NewI->setCallingConv(CallingConv::Fast);
+    Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF");
+    CallInst *NewI = CallInst::Create(F->getFunctionType(), F, {size, Allocator._0, Allocator._1, Allocator._2});
+    NewI->setCallingConv(CallingConv::Swift);
     ReplaceInstWithInst(I, NewI);
     ToFree.insert(NewI);
 
@@ -770,9 +733,9 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P, SmallVe
           auto *Restore = dyn_cast<Instruction>(Save->getUniqueUndroppableUser());
           assert(Restore && dyn_cast<CallInst>(Restore)->getCalledFunction()->getName().starts_with("llvm.stackrestore"));
 
-          Function *F = M.getFunction("cuda_caching_free_host");
-          CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI});
-          Free->setCallingConv(CallingConv::Fast);
+          Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventVtF");
+          CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI, Event, Allocator._0, Allocator._1, Allocator._2});
+          Free->setCallingConv(CallingConv::Swift);
           Free->insertAfter(Restore);
           ToFree.erase(NewI);
 
@@ -786,7 +749,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P, SmallVe
 
     // Recursively update all users. This will also handle case [Free 2].
     for (auto *U : NewI->users()) {
-      UpdateClosureEnvironment(Context, M, U, ToErase, ToFree);
+      UpdateClosureEnvironment(Context, M, U, Allocator, Event, ToErase, ToFree);
     }
 
     // [Free 3] If the memory is still not freed, this will be handled once the
@@ -795,7 +758,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P, SmallVe
 
   else if (GetElementPtrInst *I = dyn_cast<GetElementPtrInst>(P)) {
     for (auto *U : I->users()) {
-      UpdateClosureEnvironment(Context, M, U, ToErase, ToFree);
+      UpdateClosureEnvironment(Context, M, U, Allocator, Event, ToErase, ToFree);
     }
   }
 
@@ -821,7 +784,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P, SmallVe
     //
     // Deciding what *kind* of pointer it is in the first place may already
     // challenging...
-    UpdateClosureEnvironment(Context, M, I->getValueOperand(), ToErase, ToFree);
+    UpdateClosureEnvironment(Context, M, I->getValueOperand(), Allocator, Event, ToErase, ToFree);
   }
 
   else if (CallInst *I = dyn_cast<CallInst>(P)) {
@@ -833,10 +796,10 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P, SmallVe
       }
       else if (Name.starts_with("llvm.lifetime.end")) {
         // Assume that we will encounter the corresponding .start()
-        Function *F = M.getFunction("cuda_caching_free_host");
+        Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventVtF");
         Value *Alloca = I->getArgOperand(1);
-        CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca});
-        Free->setCallingConv(CallingConv::Fast);
+        CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, Allocator._0, Allocator._1, Allocator._2});
+        Free->setCallingConv(CallingConv::Swift);
         Free->insertAfter(I);
         ToFree.erase(Alloca);
         ToErase.push_back(I);
@@ -851,14 +814,14 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P, SmallVe
 // setup and finalisation. The other overload of this function is the recursive
 // one that does all the hard work.
 //
-void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P)
+void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CachingHostAllocator Allocator, Value* Event)
 {
   SmallVector<Instruction*> ToErase;
   SmallPtrSet<Value*, 8> ToFree;
   Function *Parent = dyn_cast<Instruction>(P)->getFunction();
 
   // Recursively marshal the closure environment to device-accessible memory
-  UpdateClosureEnvironment(Context, M, P, ToErase, ToFree);
+  UpdateClosureEnvironment(Context, M, P, Allocator, Event, ToErase, ToFree);
 
   // Erase any instructions that we couldn't remove along the way (instructions
   // that might be part of the users() chain).
@@ -887,12 +850,86 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module &M, Value* P)
     }
 
     assert(Returns.size() == 1 && "Expected function with single 'ret' instruction. Run pass 'mergereturn'?");
-    Function* F = M.getFunction("cuda_caching_free_host");
+    Function* F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventVtF");
     Instruction *Ret = Returns.front();
     for (auto *Alloca : ToFree) {
-      CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca});
-      Free->setCallingConv(CallingConv::Fast);
+      CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, Allocator._0, Allocator._1, Allocator._2});
+      Free->setCallingConv(CallingConv::Swift);
       Free->insertBefore(Ret);
+    }
+  }
+
+  // Make sure the definition of the allocator dominates all uses. This is
+  // necessary when e.g. the default parameter allocator is used. This gets
+  // initialised only right before the call to parallel_for, but we may need it
+  // available before that point in order to marshal the closure environment to
+  // the GPU. That case will look something like:
+  //
+  // > %17 = call swiftcc { ptr, ptr, ptr } @"$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventVSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtFfA1_"()
+  // > %18 = extractvalue { ptr, ptr, ptr } %17, 0
+  // > %19 = extractvalue { ptr, ptr, ptr } %17, 1
+  // > %20 = extractvalue { ptr, ptr, ptr } %17, 2
+  //
+  // We'll also need to move the corresponding swift_release() calls to after
+  // the last use of them. That chuck looks like:
+  //
+  // > call void @swift_release(ptr %20) #6
+  // > call void @swift_release(ptr %19) #6
+  // > call void @swift_release(ptr %18) #6
+  //
+  if (Instruction *I0 = dyn_cast<Instruction>(Allocator._0)) {
+    DominatorTree DT(*Parent);
+    Instruction* Lowest = nullptr;
+    Instruction* Highest = nullptr;
+    Instruction* Release0 = nullptr;
+    Instruction* Release1 = nullptr;
+    Instruction* Release2 = nullptr;
+
+    for (auto U : I0->users()) {
+      if (Instruction* I = dyn_cast<Instruction>(U)) {
+        if (CallInst* CI = dyn_cast<CallInst>(I)) {
+          if (CI->getCalledFunction()->getName().equals("swift_release")) {
+            assert(!Release0 && "expected a single call to swift_release");
+            Release0 = I;
+            Release1 = Release0->getPrevNonDebugInstruction();
+            Release2 = Release1->getPrevNonDebugInstruction();
+            assert(dyn_cast<CallInst>(Release1)->getCalledFunction()->getName().equals("swift_release"));
+            assert(dyn_cast<CallInst>(Release2)->getCalledFunction()->getName().equals("swift_release"));
+            continue;
+          }
+        }
+
+        if (!Lowest && !Highest) {
+          Lowest = Highest = I;
+          continue;
+        }
+
+        if (!DT.dominates(Highest, I)) {
+          Highest = I;
+          continue;
+        }
+
+        if (DT.dominates(Lowest, I)) {
+          Lowest = I;
+          continue;
+        }
+      }
+    }
+
+    // At this point we should have identified the highest and lowest points
+    if (ExtractValueInst* EV0 = dyn_cast<ExtractValueInst>(I0)) {
+      if (Instruction *I0 = dyn_cast<Instruction>(EV0->getAggregateOperand())) {
+        I0->moveBefore(Highest);
+      }
+    }
+    I0->moveBefore(Highest);
+    dyn_cast<Instruction>(Allocator._1)->moveBefore(Highest);
+    dyn_cast<Instruction>(Allocator._2)->moveBefore(Highest);
+
+    if (Release0) {
+      Release0->moveAfter(Lowest);
+      Release1->moveAfter(Lowest);
+      Release2->moveAfter(Lowest);
     }
   }
 }
@@ -904,19 +941,10 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
 {
   LLVMContext &Context = M.getContext();
 
-  // Find all use sites of the parallel_for function.
-  //
-  // XXX: This is using the swift mangled name that happens to pop out from the
-  // examples, but we'll obviously need to change this in the future to be more
-  // robust. Most likely we'll put this in a separate swift package (containing
-  // other scaffolding as well) in order to fix the name of this symbol.
-  //
-  //   > swift demangle 's4main12parallel_for10iterations_ySi_ySiXEtF'
-  //   $s4main12parallel_for10iterations_ySi_ySiXEtF ---> main.parallel_for(iterations: Swift.Int, _: (Swift.Int) -> ()) -> ()
-  //
-  Function* Fseq = M.getFunction("$s4main12parallel_for10iterations_ySi_ySiXEtF");
+  // Find all use sites of the `parallel_for` function.
+  Function* Fseq = M.getFunction("$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventVSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtF");
   if (!Fseq) {
-    LLVM_DEBUG(dbgs() << "No uses of function `parallel_for` found in this module\n");
+    LLVM_DEBUG(dbgs() << "No uses of function `SwiftToPTX.parallel_for()` found in this module\n");
     return PreservedAnalyses::all();
   }
 
@@ -924,17 +952,24 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
   // a parallel GPU kernel. First, add all the necessary host-side support code.
   LinkInHostSupportCode(M, Context);
 
-  Function* Fpar = M.getFunction("launch_parallel_for");
+  Function* Fpar = M.getFunction("$s10SwiftToPTX19launch_parallel_for10iterations6kernel3env7context6streamAA5EventVSi_AA17ParallelForKernelVzSvAA7ContextVAA6StreamVtF");
   PointerType* ptr_t = PointerType::getUnqual(Context);
   IntegerType* i32_t = IntegerType::getInt32Ty(Context);
-  StructType* kernel_t = StructType::create(Context, {ptr_t, ptr_t, ptr_t, i32_t, i32_t}, "parallel_for_kernel_t");
+  StructType* kernel_t = StructType::getTypeByName(Context, "T10SwiftToPTX17ParallelForKernelV");
 
   // Iterate over all uses of the `parallel_for(iterations: body:)` function
   for (auto U = Fseq->user_begin(), UE = Fseq->user_end(); U != UE; /* See: [1] */) {
     if (CallInst *CI = dyn_cast<CallInst>(*U)) {
       Value* Iterations = CI->getArgOperand(0);
-      Value* Body = CI->getArgOperand(1);
-      Value* Env = CI->getArgOperand(2);
+      Value* Context0 = CI->getArgOperand(1);   // CUcontext
+      Value* Context1 = CI->getArgOperand(2);   // { cuDevice, multiProcessorCount }
+      Value* Context2 = CI->getArgOperand(3);   // { maxThreadsPerMultiprocessor, warpSize }
+      Value* Allocator0 = CI->getArgOperand(4); // bin_size_bytes
+      Value* Allocator1 = CI->getArgOperand(5); // cached_blocks
+      Value* Allocator2 = CI->getArgOperand(6); // live_blocks
+      Value* Stream = CI->getArgOperand(7);
+      Value* Body = CI->getArgOperand(8);
+      Value* Env = CI->getArgOperand(9);
 
       GlobalValue* G = dyn_cast<GlobalValue>(Body);
       if (!G) {
@@ -1007,17 +1042,18 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
       // Update the calling instruction to our placeholder `parallel_for` to our
       // kernel launcher. This assumes that the environment is set up correctly,
       // which we will do in the next step.
-      std::vector<Value*> params = {Iterations, Kernel, Env, nullptr_c};
+      std::vector<Value*> params = {Iterations, Kernel, Env, Context0, Context1, Context2, Stream};
       CallInst* CIpar = CallInst::Create(Fpar->getFunctionType(), Fpar, params);
+      CIpar->setCallingConv(CallingConv::Swift);
       CIpar->addParamAttr(1, Attribute::NonNull);
       CIpar->addParamAttr(2, Attribute::NonNull);
-      CIpar->insertBefore(CI);
       CIpar->setDebugLoc(CI->getDebugLoc());  // XXX: copy all metadata?
+      CIpar->insertBefore(CI);
       CI->eraseFromParent();
 
       // Update the closure environment so that its contents are accessible from
       // the device.
-      UpdateClosureEnvironment(Context, M, Env);
+      UpdateClosureEnvironment(Context, M, Env, { Allocator0, Allocator1, Allocator2 }, CIpar);
     }
   }
 
