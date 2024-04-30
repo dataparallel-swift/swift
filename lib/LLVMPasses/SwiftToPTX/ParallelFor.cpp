@@ -4,8 +4,6 @@
 
 #include "llvm/Transforms/ParallelFor.h"
 
-#include <llvm/ADT/DenseMap.h>
-#include <llvm/ADT/SmallSet.h>
 #include <llvm/ADT/SetVector.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringMap.h>
@@ -17,24 +15,17 @@
 #include <llvm/IR/GlobalValue.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/PassManager.h>
-#include <llvm/IR/Type.h>
-#include <llvm/IR/Verifier.h>
 #include <llvm/IRPrinter/IRPrintingPasses.h>
 #include <llvm/Linker/Linker.h>
 #include <llvm/MC/TargetRegistry.h>
-#include <llvm/Object/ObjectFile.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Passes/PassPlugin.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Debug.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/FileSystem.h>
-#include <llvm/Support/TargetSelect.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
-#include <llvm/Transforms/IPO/GlobalDCE.h>
-#include <llvm/Transforms/IPO/StripDeadPrototypes.h>
-#include <llvm/Transforms/IPO/StripSymbols.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <stdlib.h>
@@ -132,14 +123,14 @@ declare swiftcc ptr @"$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF"(i64, pt
 ;                                                                         ╰─────────────────── size in bytes
 
 ; SwiftToPTX.CachingHostAllocator.free(Swift.UnsafeMutableRawPointer, SwiftToPTX.Event) -> ()
-declare swiftcc void @"$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventVtF"(ptr, ptr, ptr, ptr, ptr) local_unnamed_addr #0
+declare swiftcc void @"$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF"(ptr, ptr, ptr, ptr, ptr) local_unnamed_addr #0
 ;                                                                                   │    │    ╰────┬────╯
 ;                                                                                   │    │         ╰───────── caching host allocator state
 ;                                                                                   │    ╰─────────────────── ready event
 ;                                                                                   ╰──────────────────────── pointer to free
 
 ; SwiftToPTX.parallel_for(iterations: Swift.Int, context: SwiftToPTX.Context, allocator: SwiftToPTX.CachingHostAllocator, stream: SwiftToPTX.Stream, _: (Swift.Int) -> ()) -> SwiftToPTX.Event
-declare swiftcc ptr @"$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventVSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtF"(i64, ptr, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr) local_unnamed_addr #0
+declare swiftcc ptr @"$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventCSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtF"(i64, ptr, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr) local_unnamed_addr #0
 ;                                                                                                                                                           │     ╰────┬────╯   ╰────┬────╯    │    │    ╰──── eclosure nvironment
 ;                                                                                                                                                           │          │             │         │    ╰───────── body of the parallel_for loop
 ;                                                                                                                                                           │          │             │         ╰────────────── exeution stream
@@ -148,7 +139,7 @@ declare swiftcc ptr @"$s10SwiftToPTX12parallel_for10iterations7context9allocator
 ;                                                                                                                                                           ╰───────────────────────────────────────────────── pointer to free
 
 ; SwiftToPTX.launch_parallel_for(iterations: Swift.Int, kernel: inout SwiftToPTX.ParallelForKernel, env: Swift.UnsafeMutableRawPointer, context: SwiftToPTX.Context, stream: SwiftToPTX.Stream) -> SwiftToPTX.Event
-declare swiftcc ptr @"$s10SwiftToPTX19launch_parallel_for10iterations6kernel3env7context6streamAA5EventVSi_AA17ParallelForKernelVzSvAA7ContextVAA6StreamVtF"(i64, ptr nocapture dereferenceable(32), ptr, ptr, i64, i64, ptr) local_unnamed_addr #0
+declare swiftcc ptr @"$s10SwiftToPTX19launch_parallel_for10iterations6kernel3env7context6streamAA5EventCSi_AA17ParallelForKernelVzSvAA7ContextVAA6StreamVtF"(i64, ptr nocapture dereferenceable(32), ptr, ptr, i64, i64, ptr) local_unnamed_addr #0
 ;                                                                                                                                                             │    │                                  │    ╰────┬────╯    ╰──── closure environment (updated to be GPU accessible)
 ;                                                                                                                                                             │    │                                  │         ╰────────────── CUDA context state
 ;                                                                                                                                                             │    │                                  ╰──────────────────────── closure environment
@@ -511,7 +502,7 @@ SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVM
   // copy over the function bodies.
   ValueToValueMapTy VMap;
   for (auto &GV : GVs) {
-    Function *Src = dyn_cast<Function>(GV);
+    Function *Src = cast<Function>(GV);
     Function *Dst = Function::Create(Src->getFunctionType(), Src->getLinkage(), Src->getName(), *M);
     Dst->copyAttributesFrom(Src);
     VMap[Src] = Dst;
@@ -533,7 +524,7 @@ SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVM
     if (GV->isDeclaration())
       continue;
 
-    Function *Src = dyn_cast<Function>(GV);
+    Function *Src = cast<Function>(GV);
     Function *Dst = M->getFunction(Src->getName());
     Function::arg_iterator DstI = Dst->arg_begin();
     for (const Argument &I : Src->args()) {
@@ -583,7 +574,7 @@ SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVM
   Function *Body = M->getFunction("body");
   assert(Body->hasOneUser() && "expected only one call to the kernel body");
   assert(isa<CallInst>(Body->getUniqueUndroppableUser()));
-  CallInst *CI = dyn_cast<CallInst>(Body->getUniqueUndroppableUser());
+  CallInst *CI = cast<CallInst>(Body->getUniqueUndroppableUser());
   CI->setCalledOperand(M->getFunction(Main));
 
   // Create a target machine
@@ -664,11 +655,16 @@ SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVM
 
 // Swift will apply scalar replacement of aggregates in order to pass struct
 // (components) in registers for function calls.
+//
+// Somewhat ironically, we repackage those components again to make it a bit
+// more convenient to work with, and hope that the (C++) compiler again does the
+// same thing to make our function calls more efficient.
 struct SORA3 {
   Value* _0;
   Value* _1;
   Value* _2;
 };
+typedef struct SORA3 CUDAContext;
 typedef struct SORA3 CachingHostAllocator;
 
 // Update the environment so that its contents are accessible from the device.
@@ -700,7 +696,7 @@ typedef struct SORA3 CachingHostAllocator;
 // of indirection.
 //
 template <unsigned N>
-void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CachingHostAllocator Allocator, Value* Event, SmallVector<Instruction*>& ToErase, SmallPtrSet<Value*, N>& ToFree)
+void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDAContext CUDA, CachingHostAllocator Allocator, Value* Event, SmallVector<Instruction*>& ToErase, SmallPtrSet<Value*, N>& ToFree)
 {
   if (AllocaInst* I = dyn_cast<AllocaInst>(P)) {
     auto TypeSize = I->getAllocationSize(M.getDataLayout());
@@ -727,13 +723,13 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, Caching
     // [Free 1]: Check for an llvm.stacksave() instruction
     if (auto *Prev = dyn_cast<Instruction>(NewI)->getPrevNonDebugInstruction()) {
       if (CallInst *Save = dyn_cast<CallInst>(Prev)) {
-        if (Save->getCalledFunction()->getName().starts_with("llvm.stacksave")) {
+        if (Save->getCalledFunction()->getName().equals("llvm.stacksave")) {
           assert(Save->hasOneUser() && "expected llvm.stacksave() to have a single unique undroppable user");
 
-          auto *Restore = dyn_cast<Instruction>(Save->getUniqueUndroppableUser());
-          assert(Restore && dyn_cast<CallInst>(Restore)->getCalledFunction()->getName().starts_with("llvm.stackrestore"));
+          auto *Restore = cast<Instruction>(Save->getUniqueUndroppableUser());
+          assert(dyn_cast<CallInst>(Restore)->getCalledFunction()->getName().equals("llvm.stackrestore"));
 
-          Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventVtF");
+          Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
           CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI, Event, Allocator._0, Allocator._1, Allocator._2});
           Free->setCallingConv(CallingConv::Swift);
           Free->insertAfter(Restore);
@@ -749,7 +745,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, Caching
 
     // Recursively update all users. This will also handle case [Free 2].
     for (auto *U : NewI->users()) {
-      UpdateClosureEnvironment(Context, M, U, Allocator, Event, ToErase, ToFree);
+      UpdateClosureEnvironment(Context, M, U, CUDA, Allocator, Event, ToErase, ToFree);
     }
 
     // [Free 3] If the memory is still not freed, this will be handled once the
@@ -758,21 +754,23 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, Caching
 
   else if (GetElementPtrInst *I = dyn_cast<GetElementPtrInst>(P)) {
     for (auto *U : I->users()) {
-      UpdateClosureEnvironment(Context, M, U, Allocator, Event, ToErase, ToFree);
+      UpdateClosureEnvironment(Context, M, U, CUDA, Allocator, Event, ToErase, ToFree);
     }
   }
 
   else if (StoreInst *I = dyn_cast<StoreInst>(P)) {
-    // XXX: There is a lot more that could (should) be done here, depending on
-    // the type of the value operand. Pointer operands in particular are where
-    // the difficulty lies.
+    // There is a lot to be done here, depending on the type of the value
+    // operand.
     //
-    //   1. If this an array pointer, should we register it as usable from the
-    //      device, or require that the array memory is already (directly)
-    //      accessible from the device? We should be able to recover the size of
-    //      the array, but determining the size of the elements?
+    //   1. If this is an instruction we just recur
     //
-    //   2. If this is a function pointer, then
+    //   2. If this a data pointer (e.g. array) we need to register that memory
+    //      to be accessible from the device. The secondary complication here is
+    //      determining the size (in bytes, or elements and stride of each
+    //      element) of the data. The tertiary complication is later
+    //      un-registering that memory, otherwise we will leak *pinned* memory.
+    //
+    //   3. If this is a function pointer, then:
     //
     //      (a) If we can determine (from the callsite of the parent function)
     //          what function is being called (i.e. rely on the compiler
@@ -782,9 +780,11 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, Caching
     //      (b) If we can't determine what function this is (i.e. it is just a
     //          raw function pointer, then..?
     //
-    // Deciding what *kind* of pointer it is in the first place may already
-    // challenging...
-    UpdateClosureEnvironment(Context, M, I->getValueOperand(), Allocator, Event, ToErase, ToFree);
+    Value *A = I->getValueOperand();
+    if (isa<Instruction>(A)) {
+      UpdateClosureEnvironment(Context, M, A, CUDA, Allocator, Event, ToErase, ToFree);
+    } else {
+    }
   }
 
   else if (CallInst *I = dyn_cast<CallInst>(P)) {
@@ -796,7 +796,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, Caching
       }
       else if (Name.starts_with("llvm.lifetime.end")) {
         // Assume that we will encounter the corresponding .start()
-        Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventVtF");
+        Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
         Value *Alloca = I->getArgOperand(1);
         CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, Allocator._0, Allocator._1, Allocator._2});
         Free->setCallingConv(CallingConv::Swift);
@@ -807,21 +807,75 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, Caching
     }
   }
 
-  LLVM_DEBUG(dbgs() << "UpdateClosureEnvironment: unhandled instruction: " << *P << "\n");
+  else if (PtrToIntInst *I = dyn_cast<PtrToIntInst>(P)) {
+    // Raw buffers (e.g. UnsafeMutableBufferPointer<Element>) seem to be passed
+    // as i64 rather than as ptr. Dig around a bit until we find a reference to
+    // the underlying storage so that we can get the element count.
+    IntegerType* i64_t = IntegerType::getInt64Ty(Context);
+    IntegerType* i32_t = IntegerType::getInt32Ty(Context);
+    StructType* ContiguousArrayStorageBase = StructType::getTypeByName(Context, "Ts28__ContiguousArrayStorageBaseC");
+    Value* P = I->getPointerOperand();
+    Value* A = nullptr;
+
+    if (GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(P)) {
+      assert(GEP->getNumIndices() == 1);
+      assert(GEP->getOperand(1) == ConstantInt::get(i64_t, 32));
+      A = GEP->getPointerOperand();
+    } else {
+      report_fatal_error("UpdateClosureEnvironment: unhandled case", false);
+    }
+
+    // Compute the size of the array and the corresponding device pointer.
+    //
+    // XXX TODO: We need to compute the stride of each element. Currently we are
+    // just assuming that it is float. We might be able to search around and see
+    // if we can find an 'allocateBufferUninitialized' instruction, as this
+    // carries the type witness we could use.
+    GetElementPtrInst* GEP = GetElementPtrInst::CreateInBounds(ContiguousArrayStorageBase, A, { ConstantInt::get(i64_t, 0), ConstantInt::get(i32_t, 1) }, "", I);
+    Value* Count = new LoadInst(i64_t, GEP, "", false, Align(8), I);
+    Value* Stride = ConstantInt::get(i64_t, 4);
+    Function* F = M.getFunction("$s10SwiftToPTX16getDevicePointerys6UInt64VSv_S2itF");
+    CallInst* Inew = CallInst::Create(F->getFunctionType(), F, {P, Count, Stride});
+    ReplaceInstWithInst(I, Inew);
+
+    // In the function epilogue we check that the pointer address that was
+    // stored in the closure environment is the same as after the closure was
+    // executed. Presumably this signals that some error occurred (buffer
+    // overrun, stack clobbering, ...?) in which case the function will SIGTRAP.
+    /* for (auto U : P->users()) { */
+    for (auto U = P->user_begin(), UE = P->user_end(); U != UE; /* See: [1] */) {
+      Value *V = *U++;
+
+      if (V == Inew) {
+        continue;
+      }
+
+      if (ICmpInst *ICMP = dyn_cast<ICmpInst>(V)) {
+        IntToPtrInst *X = cast<IntToPtrInst>(ICMP->getOperand(1));
+        ICmpInst *ICMPnew = new ICmpInst(CmpInst::ICMP_EQ, Inew, X->getOperand(0));
+        ReplaceInstWithInst(ICMP, ICMPnew);
+        X->eraseFromParent();
+      }
+    }
+  }
+
+  else {
+    LLVM_DEBUG(dbgs() << "UpdateClosureEnvironment: unhandled instruction: " << *P << "\n");
+  }
 }
 
 // This is the entry point to UpdateClosureEnvironment(). This handles some
 // setup and finalisation. The other overload of this function is the recursive
 // one that does all the hard work.
 //
-void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CachingHostAllocator Allocator, Value* Event)
+void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDAContext CUDA, CachingHostAllocator Allocator, Value* Event)
 {
   SmallVector<Instruction*> ToErase;
   SmallPtrSet<Value*, 8> ToFree;
-  Function *Parent = dyn_cast<Instruction>(P)->getFunction();
+  Function *Parent = cast<Instruction>(P)->getFunction();
 
   // Recursively marshal the closure environment to device-accessible memory
-  UpdateClosureEnvironment(Context, M, P, Allocator, Event, ToErase, ToFree);
+  UpdateClosureEnvironment(Context, M, P, CUDA, Allocator, Event, ToErase, ToFree);
 
   // Erase any instructions that we couldn't remove along the way (instructions
   // that might be part of the users() chain).
@@ -850,7 +904,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, Caching
     }
 
     assert(Returns.size() == 1 && "Expected function with single 'ret' instruction. Run pass 'mergereturn'?");
-    Function* F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventVtF");
+    Function* F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
     Instruction *Ret = Returns.front();
     for (auto *Alloca : ToFree) {
       CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, Allocator._0, Allocator._1, Allocator._2});
@@ -865,7 +919,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, Caching
   // available before that point in order to marshal the closure environment to
   // the GPU. That case will look something like:
   //
-  // > %17 = call swiftcc { ptr, ptr, ptr } @"$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventVSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtFfA1_"()
+  // > %17 = call swiftcc { ptr, ptr, ptr } @"$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventCSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtFfA1_"()
   // > %18 = extractvalue { ptr, ptr, ptr } %17, 0
   // > %19 = extractvalue { ptr, ptr, ptr } %17, 1
   // > %20 = extractvalue { ptr, ptr, ptr } %17, 2
@@ -877,15 +931,19 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, Caching
   // > call void @swift_release(ptr %19) #6
   // > call void @swift_release(ptr %18) #6
   //
-  if (Instruction *I0 = dyn_cast<Instruction>(Allocator._0)) {
-    DominatorTree DT(*Parent);
+  // Similarly we need to make sure that the context is initialised before using
+  // the allocator
+  //
+  DominatorTree DT(*Parent);
+  if (isa<Instruction>(CUDA._0) || isa<Instruction>(Allocator._0)) {
     Instruction* Lowest = nullptr;
     Instruction* Highest = nullptr;
     Instruction* Release0 = nullptr;
     Instruction* Release1 = nullptr;
     Instruction* Release2 = nullptr;
 
-    for (auto U : I0->users()) {
+    // Locate the pre- and post-dominating instructions
+    for (auto U : Allocator._0->users()) {
       if (Instruction* I = dyn_cast<Instruction>(U)) {
         if (CallInst* CI = dyn_cast<CallInst>(I)) {
           if (CI->getCalledFunction()->getName().equals("swift_release")) {
@@ -893,13 +951,13 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, Caching
             Release0 = I;
             Release1 = Release0->getPrevNonDebugInstruction();
             Release2 = Release1->getPrevNonDebugInstruction();
-            assert(dyn_cast<CallInst>(Release1)->getCalledFunction()->getName().equals("swift_release"));
-            assert(dyn_cast<CallInst>(Release2)->getCalledFunction()->getName().equals("swift_release"));
+            assert(cast<CallInst>(Release1)->getCalledFunction()->getName().equals("swift_release"));
+            assert(cast<CallInst>(Release2)->getCalledFunction()->getName().equals("swift_release"));
             continue;
           }
         }
 
-        if (!Lowest && !Highest) {
+        if (!Highest) {
           Lowest = Highest = I;
           continue;
         }
@@ -916,21 +974,61 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, Caching
       }
     }
 
-    // At this point we should have identified the highest and lowest points
-    if (ExtractValueInst* EV0 = dyn_cast<ExtractValueInst>(I0)) {
-      if (Instruction *I0 = dyn_cast<Instruction>(EV0->getAggregateOperand())) {
-        I0->moveBefore(Highest);
+    // Move context and allocator (de)initialisers
+    if (Instruction *I = dyn_cast<Instruction>(CUDA._0)) {
+      if (ExtractValueInst *EV = dyn_cast<ExtractValueInst>(I)) {
+        if (Instruction *I0 = dyn_cast<Instruction>(EV->getAggregateOperand())) {
+          I0->moveBefore(Highest);
+        }
       }
+      I->moveBefore(Highest);
+      cast<Instruction>(CUDA._1)->moveBefore(Highest);
+      cast<Instruction>(CUDA._2)->moveBefore(Highest);
     }
-    I0->moveBefore(Highest);
-    dyn_cast<Instruction>(Allocator._1)->moveBefore(Highest);
-    dyn_cast<Instruction>(Allocator._2)->moveBefore(Highest);
+
+    if (Instruction *I = dyn_cast<Instruction>(Allocator._0)) {
+      if (ExtractValueInst *EV = dyn_cast<ExtractValueInst>(I)) {
+        if (Instruction *I0 = dyn_cast<Instruction>(EV->getAggregateOperand())) {
+          I0->moveBefore(Highest);
+        }
+      }
+      I->moveBefore(Highest);
+      cast<Instruction>(Allocator._1)->moveBefore(Highest);
+      cast<Instruction>(Allocator._2)->moveBefore(Highest);
+    }
 
     if (Release0) {
       Release0->moveAfter(Lowest);
       Release1->moveAfter(Lowest);
       Release2->moveAfter(Lowest);
     }
+  }
+
+  // Also ensure we don't swift_release the ready event too early
+  Instruction* Lowest = nullptr;
+  Instruction* Release = nullptr;
+  for (auto U : Event->users()) {
+    if (Instruction* I = dyn_cast<Instruction>(U)) {
+      if (CallInst* CI = dyn_cast<CallInst>(I)) {
+        if (CI->getCalledFunction()->getName().equals("swift_release")) {
+          Release = I;
+          continue;
+        }
+      }
+
+      if (!Lowest) {
+        Lowest = I;
+        continue;
+      }
+
+      if (DT.dominates(Lowest, I)) {
+        Lowest = I;
+      }
+    }
+  }
+
+  if (Release && Lowest) {
+    Release->moveAfter(Lowest);
   }
 }
 
@@ -942,7 +1040,7 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
   LLVMContext &Context = M.getContext();
 
   // Find all use sites of the `parallel_for` function.
-  Function* Fseq = M.getFunction("$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventVSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtF");
+  Function* Fseq = M.getFunction("$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventCSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtF");
   if (!Fseq) {
     LLVM_DEBUG(dbgs() << "No uses of function `SwiftToPTX.parallel_for()` found in this module\n");
     return PreservedAnalyses::all();
@@ -952,14 +1050,18 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
   // a parallel GPU kernel. First, add all the necessary host-side support code.
   LinkInHostSupportCode(M, Context);
 
-  Function* Fpar = M.getFunction("$s10SwiftToPTX19launch_parallel_for10iterations6kernel3env7context6streamAA5EventVSi_AA17ParallelForKernelVzSvAA7ContextVAA6StreamVtF");
+  Function* Fpar = M.getFunction("$s10SwiftToPTX19launch_parallel_for10iterations6kernel3env7context6streamAA5EventCSi_AA17ParallelForKernelVzSvAA7ContextVAA6StreamVtF");
   PointerType* ptr_t = PointerType::getUnqual(Context);
   IntegerType* i32_t = IntegerType::getInt32Ty(Context);
   StructType* kernel_t = StructType::getTypeByName(Context, "T10SwiftToPTX17ParallelForKernelV");
 
   // Iterate over all uses of the `parallel_for(iterations: body:)` function
   for (auto U = Fseq->user_begin(), UE = Fseq->user_end(); U != UE; /* See: [1] */) {
-    if (CallInst *CI = dyn_cast<CallInst>(*U)) {
+    // NOTE [1]: Update the iterator to point to the next User already, because
+    // we might modify this instruction, which will break the iterator.
+    Value* V = *U++;
+
+    if (CallInst *CI = dyn_cast<CallInst>(V)) {
       Value* Iterations = CI->getArgOperand(0);
       Value* Context0 = CI->getArgOperand(1);   // CUcontext
       Value* Context1 = CI->getArgOperand(2);   // { cuDevice, multiProcessorCount }
@@ -1025,19 +1127,19 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
       Image->setAlignment(Align(1));
       Image->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
 
-      ConstantInt* zero_c = ConstantInt::get(i32_t, 0);
-      ConstantPointerNull* nullptr_c = ConstantPointerNull::get(ptr_t);
+      // Swift is kind of bonkers and wraps all data types as struct types,
       GlobalVariable* Kernel = new GlobalVariable(M, kernel_t, false,
           GlobalValue::InternalLinkage,
-          ConstantStruct::get(kernel_t, {Image, nullptr_c, nullptr_c , zero_c, zero_c}),
+          ConstantStruct::get(kernel_t,
+              { ConstantStruct::get(cast<StructType>(kernel_t->getElementType(0)), {Image})
+              , ConstantAggregateZero::get(kernel_t->getElementType(1))
+              , ConstantAggregateZero::get(kernel_t->getElementType(2))
+              , ConstantAggregateZero::get(kernel_t->getElementType(3))
+              , ConstantAggregateZero::get(kernel_t->getElementType(4))
+              }),
           Body->getName() + "$kernel");
       Kernel->setAlignment(Align(8));
       Kernel->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
-
-      // NOTE [1]: Update the iterator for the next use of the `parallel_for`
-      // function *before* updating the operand of the call site, otherwise the
-      // iterator sequence will be lost.
-      U++;
 
       // Update the calling instruction to our placeholder `parallel_for` to our
       // kernel launcher. This assumes that the environment is set up correctly,
@@ -1047,13 +1149,11 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
       CIpar->setCallingConv(CallingConv::Swift);
       CIpar->addParamAttr(1, Attribute::NonNull);
       CIpar->addParamAttr(2, Attribute::NonNull);
-      CIpar->setDebugLoc(CI->getDebugLoc());  // XXX: copy all metadata?
-      CIpar->insertBefore(CI);
-      CI->eraseFromParent();
+      ReplaceInstWithInst(CI, CIpar);
 
       // Update the closure environment so that its contents are accessible from
       // the device.
-      UpdateClosureEnvironment(Context, M, Env, { Allocator0, Allocator1, Allocator2 }, CIpar);
+      UpdateClosureEnvironment(Context, M, Env, { Context0, Context1, Context2 }, { Allocator0, Allocator1, Allocator2 }, CIpar);
     }
   }
 

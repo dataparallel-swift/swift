@@ -12,6 +12,8 @@
 
 namespace llvm {
 
+class Module;
+
 struct ParallelForPass : public PassInfoMixin<ParallelForPass> {
 public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
