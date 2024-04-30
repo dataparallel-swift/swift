@@ -784,6 +784,54 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDACon
     if (isa<Instruction>(A)) {
       UpdateClosureEnvironment(Context, M, A, CUDA, Allocator, Event, ToErase, ToFree);
     } else {
+      if (PointerType *T = dyn_cast<PointerType>(A->getType())) {
+        // This is a pointer to something: try to figure out what it is and what
+        // the size of that data is. Currently only looks for arrays.
+        for (auto U : A->users()) {
+          if (U == P)
+            continue;
+
+          if (GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(U)) {
+            IntegerType* i64_t = IntegerType::getInt64Ty(Context);
+            IntegerType* i32_t = IntegerType::getInt32Ty(Context);
+            StructType* ContiguousArrayStorageBase = StructType::getTypeByName(Context, "Ts28__ContiguousArrayStorageBaseC");
+            Value* Count = nullptr;
+
+            // This appears to be an array
+            if ( GEP->getSourceElementType() == ContiguousArrayStorageBase
+              && GEP->getOperand(1) == ConstantInt::get(i64_t, 0)
+              && GEP->getOperand(2) == ConstantInt::get(i32_t, 1))
+            {
+              for (auto U : GEP->users()) {
+                if (LoadInst* I = dyn_cast<LoadInst>(U)) {
+                  Count = I;
+                  break;
+                }
+
+                if (StoreInst* I = dyn_cast<StoreInst>(U)) {
+                  Count = I->getValueOperand();
+                  break;
+                }
+              }
+
+              if (!Count) {
+                LoadInst* L = new LoadInst(i64_t, GEP, "", false, Align(8));
+                L->insertAfter(GEP);
+                Count = L;
+              }
+
+              // XXX TODO: Compute the stride of each element
+              Value* Stride = ConstantInt::get(i64_t, 4);
+              Function* F = M.getFunction("$s10SwiftToPTX16getDevicePointerys6UInt64VSv_S2itF");
+              CallInst* Anew = CallInst::Create(F->getFunctionType(), F, {A, Count, Stride});
+              StoreInst* Inew = new StoreInst(Anew, I->getPointerOperand(), false, Align(16));
+              Anew->insertBefore(I);
+              ReplaceInstWithInst(I, Inew);
+              break;
+            }
+          }
+        }
+      }
     }
   }
 
@@ -846,9 +894,8 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDACon
     for (auto U = P->user_begin(), UE = P->user_end(); U != UE; /* See: [1] */) {
       Value *V = *U++;
 
-      if (V == Inew) {
+      if (V == Inew)
         continue;
-      }
 
       if (ICmpInst *ICMP = dyn_cast<ICmpInst>(V)) {
         IntToPtrInst *X = cast<IntToPtrInst>(ICMP->getOperand(1));
