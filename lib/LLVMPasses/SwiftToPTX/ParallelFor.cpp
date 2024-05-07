@@ -801,7 +801,13 @@ Type* GetArrayElementType(LLVMContext& Context, Module& M, Value* P)
     }
 
     if (CallBase* I = dyn_cast<CallBase>(U)) {
-      errs() << "GetArrayElementType CallBase " << *I << "\n";
+      // XXX TODO: This is an indirect call to a captured closure. Maybe we can
+      // determine the function from the call site and specialise (inline) it
+      // into the compiled kernel. ---TLM 2024-05-07
+      if (P == I->getCalledOperand()) {
+        report_fatal_error("(indirect) function calls captured by closure environment are not (yet) supported", false);
+      }
+
       assert(false && "TODO: (indirect) function calls");
     }
 
@@ -814,13 +820,21 @@ Type* GetArrayElementType(LLVMContext& Context, Module& M, Value* P)
 // Get a device-accessible pointer to the given address. This is usually
 // possible for output arguments, as one of the incoming edges will be allocate
 // an array of the appropriate size and type.
+//
+// The more robust way to do this is---similar to the below---searching through
+// the closure itself to determine the type of the elements read or written.
+// This is a little more complicated in this case because we are going to be
+// arriving from a PtrToInt instruction, so need to dig until we get that
+// corresponding IntToPtr, but otherwise the recursive descent method seems like
+// a better way to go...
 Instruction* GetDevicePointer(LLVMContext& Context, Module& M, Value* Addr, Instruction* InsertBefore)
 {
   Value* Type = GetArrayTypeDictionary(Context, Addr);
   Value* Count = GetArrayCount(Context, Addr, InsertBefore);
   Function* F = M.getFunction("$s10SwiftToPTX16getDevicePointerys6UInt64VSpyxG_SitlF");
 
-  assert(Type && Count);
+  assert(Type && "could not determine type of input array");
+  assert(Count && "could not determine size of input array");
   return CallInst::Create(F->getFunctionType(), F, { Addr, Count, Type });
 }
 
