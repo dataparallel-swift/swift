@@ -26,6 +26,8 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
+#include <llvm/Transforms/InstCombine/InstCombine.h>
+#include <llvm/Transforms/Scalar/GVN.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <stdlib.h>
@@ -159,6 +161,12 @@ declare swiftcc i64 @"$s10SwiftToPTX16getDevicePointerys6UInt64VSv_S2itF"(ptr, i
 ;                                                                          ╰────────────── pointer
 
 
+; SwiftToPTX.getDevicePointer(Swift.UnsafeMutableRawPointer, Swift.Int) -> Swift.UInt64
+declare swiftcc i64 @"$s10SwiftToPTX16getDevicePointerys6UInt64VSv_SitF"(ptr, i64) local_unnamed_addr #0
+;                                                                         │    ╰──── bytes
+;                                                                         ╰───────── pointer
+
+
 attributes #0 = { "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
 attributes #1 = { sspreq "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
 
@@ -205,14 +213,14 @@ const StringMap<StringRef> libdeviceFunctions =
   /* ,{"llvm.memmove.inline",  "" */
   /* ,{"llvm.memset",          "" */
   /* ,{"llvm.memset.inline",   "" */
-  ,{"llvm.sqrt.f64",        "__nv_sqrt"}
-  ,{"llvm.sqrt.f32",        "__nv_sqrtf"}
+  ,{"llvm.sqrt.f64",        "__nv_sqrt"},   {"sqrt",  "__nv_sqrt"}
+  ,{"llvm.sqrt.f32",        "__nv_sqrtf"},  {"sqrtf", "__nv_sqrtf"}
   ,{"llvm.powi.f64.i32",    "__nv_powi"}
   ,{"llvm.powi.f32.i32",    "__nv_powif"}
-  ,{"llvm.sin.f64",         "__nv_sin"}
-  ,{"llvm.sin.f32",         "__nv_sinf"}
-  ,{"llvm.cos.f64",         "__nv_cos"}
-  ,{"llvm.cos.f32",         "__nv_cosf"}
+  ,{"llvm.sin.f64",         "__nv_sin"},    {"sin",   "__nv_sin"}
+  ,{"llvm.sin.f32",         "__nv_sinf"},   {"sinf",  "__nv_sinf"}
+  ,{"llvm.cos.f64",         "__nv_cos"},    {"cos",   "__nv_cos"}
+  ,{"llvm.cos.f32",         "__nv_cosf"},   {"cosf",  "__nv_cosf"}
   ,{"llvm.pow.f64",         "__nv_pow"}
   ,{"llvm.pow.f32",         "__nv_powf"}
   ,{"llvm.exp.f64",         "__nv_exp"}
@@ -282,7 +290,6 @@ const StringMap<StringRef> libdeviceFunctions =
 //
 const Twine LocateLibdeviceFile()
 {
-  /* return "libdevice.10.bc"; */
   return "/usr/local/cuda/nvvm/libdevice/libdevice.10.bc";
 }
 
@@ -667,6 +674,208 @@ struct SORA3 {
 typedef struct SORA3 CUDAContext;
 typedef struct SORA3 CachingHostAllocator;
 
+
+Value* GetArrayTypeDictionary(LLVMContext& Context, Value* P)
+{
+  if (CallInst* I = dyn_cast<CallInst>(P)) {
+    if (Function* F = I->getCalledFunction()) {
+      if (F->getName().equals("$sSa28_allocateBufferUninitialized15minimumCapacitys016_ContiguousArrayB0VyxGSi_tFZ")) {
+        return I->getOperand(1);
+      }
+    }
+  }
+
+  else if (GetElementPtrInst* I = dyn_cast<GetElementPtrInst>(P)) {
+    return GetArrayTypeDictionary(Context, I->getPointerOperand());
+  }
+
+  else if (PHINode* I = dyn_cast<PHINode>(P)) {
+    const unsigned int N = I->getNumIncomingValues();
+    for (unsigned int i = 0; i < N; ++i) {
+      if (Value* R = GetArrayTypeDictionary(Context, I->getIncomingValue(i))) {
+        return R;
+      }
+    }
+  }
+
+  return nullptr;
+}
+
+Value* GetArrayCount(LLVMContext& Context, Value* P, Instruction* InsertBefore)
+{
+  IntegerType* i8_t  = IntegerType::getInt8Ty(Context);
+  IntegerType* i32_t = IntegerType::getInt32Ty(Context);
+  IntegerType* i64_t = IntegerType::getInt64Ty(Context);
+  StructType* ContiguousArrayStorageBase = StructType::getTypeByName(Context, "Ts28__ContiguousArrayStorageBaseC");
+
+  Value* BaseAddress = nullptr;
+
+  if (Instruction* I = dyn_cast<Instruction>(P)) {
+    if (GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(P)) {
+      assert(GEP->getNumIndices() == 1);
+      assert(GEP->getOperand(1) == ConstantInt::get(i64_t, 32));
+      BaseAddress = GEP->getPointerOperand();
+    }
+    else {
+      BaseAddress = GetElementPtrInst::CreateInBounds(i8_t, P, { ConstantInt::get(i64_t, -32) }, "", InsertBefore);
+    }
+  }
+  else {
+    // If this is not an instruction it is an input to the function, so this
+    // should just point to the base of the array. Check to see if we already
+    // have the array count available before computing it again (it seems that
+    // this duplicate load is not being removed by later passes).
+    BaseAddress = P;
+    for (auto U : P->users()) {
+      if (GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(U)) {
+        // HACK: we really need to check the instruction dominates its uses
+        if (GEP->getParent() != InsertBefore->getParent())
+          continue;
+
+        if (GEP->getSourceElementType() == ContiguousArrayStorageBase
+         && GEP->getNumIndices() == 2
+         && GEP->getOperand(1) == ConstantInt::get(i64_t, 0)
+         && GEP->getOperand(2) == ConstantInt::get(i32_t, 1))
+        {
+          for (auto U : GEP->users()) {
+            if (LoadInst* I = dyn_cast<LoadInst>(U)) {
+              return I;
+            }
+
+            if (StoreInst* I = dyn_cast<StoreInst>(U)) {
+              return I->getValueOperand();
+            }
+          }
+        }
+      }
+    }
+  }
+
+  assert(BaseAddress && "Could not determine array count");
+
+  GetElementPtrInst* GEP = GetElementPtrInst::CreateInBounds
+      ( ContiguousArrayStorageBase
+      , BaseAddress
+      , { ConstantInt::get(i64_t, 0), ConstantInt::get(i32_t, 1) }
+      , ""
+      , InsertBefore
+      );
+  return new LoadInst(i64_t, GEP, "", false, Align(8), InsertBefore);
+}
+
+Type* GetArrayElementType(LLVMContext& Context, Module& M, Value* P)
+{
+  IntegerType* i8_t  = IntegerType::getInt8Ty(Context);
+  IntegerType* i64_t = IntegerType::getInt64Ty(Context);
+  StructType* ContiguousArrayStorageBase = StructType::getTypeByName(Context, "Ts28__ContiguousArrayStorageBaseC");
+
+  for (auto U : P->users()) {
+    if (GetElementPtrInst* I = dyn_cast<GetElementPtrInst>(U)) {
+      if (I->getSourceElementType() == ContiguousArrayStorageBase)
+      {
+        // This is a good sanity check that we are on the right path. Once we
+        // start to support more data structures this should determine what to
+        // do next; i.e. header size, payload layout, etc.
+        continue;
+      }
+
+      if (I->getSourceElementType() == i8_t
+       && I->getNumIndices() == 1
+       && I->getOperand(1) == ConstantInt::get(i64_t, 32))
+      {
+        // This is the pointer directly to the start of the payload. The users
+        // of this pointer should reveal the type of the elements.
+        return GetArrayElementType(Context, M, I);
+      }
+
+      // Otherwise we are using this GEP to load the payload data. Nice.
+      return I->getSourceElementType();
+    }
+
+    if (LoadInst* I = dyn_cast<LoadInst>(U)) {
+      return I->getType();
+    }
+
+    if (StoreInst* I = dyn_cast<StoreInst>(U)) {
+      return I->getType();
+    }
+
+    if (CallBase* I = dyn_cast<CallBase>(U)) {
+      errs() << "GetArrayElementType CallBase " << *I << "\n";
+      assert(false && "TODO: (indirect) function calls");
+    }
+
+    errs() << "GetArrayElementType unhandled: " << *U << "\n";
+  }
+
+  report_fatal_error("could not determine array element type", false);
+}
+
+// Get a device-accessible pointer to the given address. This is usually
+// possible for output arguments, as one of the incoming edges will be allocate
+// an array of the appropriate size and type.
+Instruction* GetDevicePointer(LLVMContext& Context, Module& M, Value* Addr, Instruction* InsertBefore)
+{
+  Value* Type = GetArrayTypeDictionary(Context, Addr);
+  Value* Count = GetArrayCount(Context, Addr, InsertBefore);
+  Function* F = M.getFunction("$s10SwiftToPTX16getDevicePointerys6UInt64VSpyxG_SitlF");
+
+  assert(Type && Count);
+  return CallInst::Create(F->getFunctionType(), F, { Addr, Count, Type });
+}
+
+// Get a device-accessible pointer by analysing the continuation to determine
+// the type and size of the input. Typically we need to compute both the size of
+// the header as well as the number of elements and stride of each element.
+Instruction* GetDevicePointer(LLVMContext& Context, Module& M, Value* Body, Value* Arg, Value* Addr, Instruction* InsertBefore)
+{
+  IntegerType* i8_t  = IntegerType::getInt8Ty(Context);
+  IntegerType* i64_t = IntegerType::getInt64Ty(Context);
+  StructType* ContiguousArrayStorageBase = StructType::getTypeByName(Context, "Ts28__ContiguousArrayStorageBaseC");
+
+  Function* F = cast<Function>(Body);
+  GetElementPtrInst* GEP = cast<GetElementPtrInst>(Addr);
+
+  for (auto U : F->getArg(1)->users()) {
+    if (GetElementPtrInst* GEP2 = dyn_cast<GetElementPtrInst>(U)) {
+      if (!GEP2->hasAllConstantIndices())
+        continue;
+
+      if (GEP2->getNumIndices() != GEP->getNumIndices())
+        continue;
+
+      bool Equal = true;
+      for (unsigned int i = 1; i <= GEP->getNumIndices(); ++i) {
+        if (GEP->getOperand(i) != GEP2->getOperand(i)) {
+          Equal = false;
+          break;
+        }
+      }
+
+      if (!Equal)
+        continue;
+
+      // If we have found the closure parameter that we are interested it, it
+      // should now just be loaded from the closure environment and then we can
+      // dig around a bit looking for how this array is being used.
+      assert(GEP2->hasOneUser());
+      LoadInst *P = cast<LoadInst>(GEP2->getUniqueUndroppableUser());
+
+      Type* ElementType = GetArrayElementType(Context, M, P);
+      Value* Count = GetArrayCount(Context, Arg, InsertBefore);
+      TypeSize Stride = M.getDataLayout().getTypeAllocSize(ElementType);
+      TypeSize Header = M.getDataLayout().getTypeAllocSize(ContiguousArrayStorageBase);
+      Instruction* Bytes = BinaryOperator::Create(Instruction::Mul, Count, ConstantInt::get(i64_t, Stride), "", InsertBefore);
+      Instruction* Total = BinaryOperator::Create(Instruction::Add, Bytes, ConstantInt::get(i64_t, Header), "", InsertBefore);
+
+      Function* F = M.getFunction("$s10SwiftToPTX16getDevicePointerys6UInt64VSv_SitF");
+      return CallInst::Create(F->getFunctionType(), F, { Arg, Total });
+    }
+  }
+
+  return nullptr;
+}
+
 // Update the environment so that its contents are accessible from the device.
 // This is the recursive overload of UpdateClosureEnvironment() that does all
 // the work; the other overload is the one is the entry point that does the
@@ -696,22 +905,41 @@ typedef struct SORA3 CachingHostAllocator;
 // of indirection.
 //
 template <unsigned N>
-void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDAContext CUDA, CachingHostAllocator Allocator, Value* Event, SmallVector<Instruction*>& ToErase, SmallPtrSet<Value*, N>& ToFree)
+void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* K, Value* P, CUDAContext CUDA, CachingHostAllocator Allocator, Value* Event, SmallVector<Instruction*>& ToErase, SmallPtrSet<Value*, N>& ToFree)
 {
-  if (AllocaInst* I = dyn_cast<AllocaInst>(P)) {
+  /* std::string dots(depth, '.'); */
+  /* errs() << dots << *P << "\n"; */
+
+  // Recur through address calculations. The user of this GEP will most likely
+  // need to refer back to this instruction in order to analyse the address
+  // calculation or pointer operand; perhaps we should do that already and guide
+  // the recursion?
+  if (GetElementPtrInst *I = dyn_cast<GetElementPtrInst>(P)) {
+    for (auto *U : I->users()) {
+      UpdateClosureEnvironment(Context, M, K, U, CUDA, Allocator, Event, ToErase, ToFree);
+    }
+  }
+
+  // Convert stack allocations into a pinned memory allocations, so that the
+  // memory is accessible from the device.
+  //
+  // Later, we also need to deallocate the memory. There are three possible
+  // cases for handling this:
+  //
+  //   1. The memory is bracketed by llvm.stacksave/llvm.stackrestore
+  //   2. The memory is marked as explicitly alive/dead by llvm.lifetime.start/llvm.lifetime.end respectively
+  //   3. The memory is implicitly released when the function returns
+  //
+  // We use the CachingHostAllocator for this, which handles our asynchronous
+  // deallocation requirements (lifetime extends beyond the lexical scope of the
+  // function call) and amortizes the cost of calling into the CUDA runtime to
+  // allocate pinned memory.
+  //
+  else if (AllocaInst* I = dyn_cast<AllocaInst>(P)) {
     auto TypeSize = I->getAllocationSize(M.getDataLayout());
     assert(TypeSize && "could not determine size of alloca");
 
-    // Convert the stack allocation into a pinned memory allocation, so that the
-    // memory is accessible from the device.
-    //
-    // Later, we also need to deallocate the memory. There are three possible
-    // cases for handling this:
-    //
-    //   1. The memory is bracketed by llvm.stacksave/llvm.stackrestore
-    //   2. The memory is marked as explicitly alive/dead by llvm.lifetime.start/llvm.lifetime.end respectively
-    //   3. The memory is implicitly released when the function returns
-    //
+    // Convert from stack to pinned heap allocation
     IntegerType *i64_t = IntegerType::getInt64Ty(Context);
     ConstantInt *size = ConstantInt::get(i64_t, TypeSize->getFixedValue());
     Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF");
@@ -720,6 +948,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDACon
     ReplaceInstWithInst(I, NewI);
     ToFree.insert(NewI);
 
+    // Determine how to (asynchronously) free the memmory
     // [Free 1]: Check for an llvm.stacksave() instruction
     if (auto *Prev = dyn_cast<Instruction>(NewI)->getPrevNonDebugInstruction()) {
       if (CallInst *Save = dyn_cast<CallInst>(Prev)) {
@@ -727,7 +956,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDACon
           assert(Save->hasOneUser() && "expected llvm.stacksave() to have a single unique undroppable user");
 
           auto *Restore = cast<Instruction>(Save->getUniqueUndroppableUser());
-          assert(dyn_cast<CallInst>(Restore)->getCalledFunction()->getName().equals("llvm.stackrestore"));
+          assert(cast<CallInst>(Restore)->getCalledFunction()->getName().equals("llvm.stackrestore"));
 
           Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
           CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI, Event, Allocator._0, Allocator._1, Allocator._2});
@@ -743,155 +972,81 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDACon
       }
     }
 
-    // Recursively update all users. This will also handle case [Free 2].
+    // Recursively update all users of this memory. This will also handle case [Free 2].
     for (auto *U : NewI->users()) {
-      UpdateClosureEnvironment(Context, M, U, CUDA, Allocator, Event, ToErase, ToFree);
+      UpdateClosureEnvironment(Context, M, K, U, CUDA, Allocator, Event, ToErase, ToFree);
     }
 
     // [Free 3] If the memory is still not freed, this will be handled once the
     // recursive update is complete.
   }
 
-  else if (GetElementPtrInst *I = dyn_cast<GetElementPtrInst>(P)) {
-    for (auto *U : I->users()) {
-      UpdateClosureEnvironment(Context, M, U, CUDA, Allocator, Event, ToErase, ToFree);
-    }
-  }
-
+  // There is a lot to be done here, depending on the type of the value
+  // operand.
+  //
+  // 1. If this is an instruction, recur. There is a potential to get into a
+  //    loop here because we might be storing a pointer to the memory that was
+  //    alloca'd as part of the closure environment. This cycle is broken
+  //    because that alloca instruction will have already been replaced with a
+  //    call to the caching allocator.
+  //
+  // 2. Otherwise, this must be an input to the function. There are two
+  //    possibilities:
+  //
+  //    a. This a data pointer (e.g. array). We need to determine the pointer to
+  //       the underlying data, as well as the number of bytes in the payload.
+  //       The data can then be registered as accessible from the device, and
+  //       the new device-accessible address is stored in place of the existing
+  //       address.
+  //
+  //       TODO: We should also unregister this memory once it is no longer
+  //       needed on the device, or at least when the array is deallocated, so
+  //       that we do not leak *pinned* memory.
+  //
+  //    b. This is a function pointer (i.e. closure). There are further
+  //       possibilities:
+  //
+  //       a. If we can determine (from the callsite of the parent function)
+  //          what function is being called (i.e. rely on the compiler
+  //          specialising this call), we should also lift that code out and
+  //          compile it (i.e. beta-reduce) directly into the kernel.
+  //
+  //       b. If we can't determine what function this is (i.e. it is just a raw
+  //          function pointer), then we'll need to update the closure pointer
+  //          at runtime after the CUDA module has been loaded with the address
+  //          of the device function.
+  //
+  //       TODO: Note that function pointers are currently not handled at all.
+  //
   else if (StoreInst *I = dyn_cast<StoreInst>(P)) {
-    // There is a lot to be done here, depending on the type of the value
-    // operand.
-    //
-    //   1. If this is an instruction we just recur
-    //
-    //   2. If this a data pointer (e.g. array) we need to register that memory
-    //      to be accessible from the device. The secondary complication here is
-    //      determining the size (in bytes, or elements and stride of each
-    //      element) of the data. The tertiary complication is later
-    //      un-registering that memory, otherwise we will leak *pinned* memory.
-    //
-    //   3. If this is a function pointer, then:
-    //
-    //      (a) If we can determine (from the callsite of the parent function)
-    //          what function is being called (i.e. rely on the compiler
-    //          specialising this call), we should also lift that code out and
-    //          compile it (i.e. beta-reduce) directly into the kernel.
-    //
-    //      (b) If we can't determine what function this is (i.e. it is just a
-    //          raw function pointer, then..?
-    //
-    Value *A = I->getValueOperand();
+    Value* A = I->getValueOperand();
+    Value* P = I->getPointerOperand();
+
     if (isa<Instruction>(A)) {
-      UpdateClosureEnvironment(Context, M, A, CUDA, Allocator, Event, ToErase, ToFree);
+      UpdateClosureEnvironment(Context, M, K, A, CUDA, Allocator, Event, ToErase, ToFree);
     } else {
       if (PointerType *T = dyn_cast<PointerType>(A->getType())) {
-        // This is a pointer to something: try to figure out what it is and what
-        // the size of that data is. Currently only looks for arrays.
-        for (auto U : A->users()) {
-          if (U == P)
-            continue;
-
-          if (GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(U)) {
-            IntegerType* i64_t = IntegerType::getInt64Ty(Context);
-            IntegerType* i32_t = IntegerType::getInt32Ty(Context);
-            StructType* ContiguousArrayStorageBase = StructType::getTypeByName(Context, "Ts28__ContiguousArrayStorageBaseC");
-            Value* Count = nullptr;
-
-            // This appears to be an array
-            if ( GEP->getSourceElementType() == ContiguousArrayStorageBase
-              && GEP->getOperand(1) == ConstantInt::get(i64_t, 0)
-              && GEP->getOperand(2) == ConstantInt::get(i32_t, 1))
-            {
-              for (auto U : GEP->users()) {
-                if (LoadInst* I = dyn_cast<LoadInst>(U)) {
-                  Count = I;
-                  break;
-                }
-
-                if (StoreInst* I = dyn_cast<StoreInst>(U)) {
-                  Count = I->getValueOperand();
-                  break;
-                }
-              }
-
-              if (!Count) {
-                LoadInst* L = new LoadInst(i64_t, GEP, "", false, Align(8));
-                L->insertAfter(GEP);
-                Count = L;
-              }
-
-              // XXX TODO: Compute the stride of each element
-              Value* Stride = ConstantInt::get(i64_t, 4);
-              Function* F = M.getFunction("$s10SwiftToPTX16getDevicePointerys6UInt64VSv_S2itF");
-              CallInst* Anew = CallInst::Create(F->getFunctionType(), F, {A, Count, Stride});
-              StoreInst* Inew = new StoreInst(Anew, I->getPointerOperand(), false, Align(16));
-              Anew->insertBefore(I);
-              ReplaceInstWithInst(I, Inew);
-              break;
-            }
-          }
-        }
+        Instruction* Anew = GetDevicePointer(Context, M, K, A, P, I);
+        StoreInst* Inew = new StoreInst(Anew, P, false, Align(16));
+        Anew->insertBefore(I);
+        ReplaceInstWithInst(I, Inew);
       }
     }
   }
 
-  else if (CallInst *I = dyn_cast<CallInst>(P)) {
-    if (Function* F = I->getCalledFunction()) {
-      StringRef Name = F->getName();
-      if (Name.starts_with("llvm.lifetime.start")) {
-        // Assume that we will encounter the corresponding .end()
-        ToErase.push_back(I);
-      }
-      else if (Name.starts_with("llvm.lifetime.end")) {
-        // Assume that we will encounter the corresponding .start()
-        Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
-        Value *Alloca = I->getArgOperand(1);
-        CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, Allocator._0, Allocator._1, Allocator._2});
-        Free->setCallingConv(CallingConv::Swift);
-        Free->insertAfter(I);
-        ToFree.erase(Alloca);
-        ToErase.push_back(I);
-      }
-    }
-  }
-
+  // Raw buffers (e.g. UnsafeMutableBufferPointer<Element>) seem to be passed
+  // as i64 rather than as ptr, but are otherwise handled similarly.
   else if (PtrToIntInst *I = dyn_cast<PtrToIntInst>(P)) {
-    // Raw buffers (e.g. UnsafeMutableBufferPointer<Element>) seem to be passed
-    // as i64 rather than as ptr. Dig around a bit until we find a reference to
-    // the underlying storage so that we can get the element count.
-    IntegerType* i64_t = IntegerType::getInt64Ty(Context);
-    IntegerType* i32_t = IntegerType::getInt32Ty(Context);
-    StructType* ContiguousArrayStorageBase = StructType::getTypeByName(Context, "Ts28__ContiguousArrayStorageBaseC");
-    Value* P = I->getPointerOperand();
-    Value* A = nullptr;
-
-    if (GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(P)) {
-      assert(GEP->getNumIndices() == 1);
-      assert(GEP->getOperand(1) == ConstantInt::get(i64_t, 32));
-      A = GEP->getPointerOperand();
-    } else {
-      report_fatal_error("UpdateClosureEnvironment: unhandled case", false);
-    }
-
-    // Compute the size of the array and the corresponding device pointer.
-    //
-    // XXX TODO: We need to compute the stride of each element. Currently we are
-    // just assuming that it is float. We might be able to search around and see
-    // if we can find an 'allocateBufferUninitialized' instruction, as this
-    // carries the type witness we could use.
-    GetElementPtrInst* GEP = GetElementPtrInst::CreateInBounds(ContiguousArrayStorageBase, A, { ConstantInt::get(i64_t, 0), ConstantInt::get(i32_t, 1) }, "", I);
-    Value* Count = new LoadInst(i64_t, GEP, "", false, Align(8), I);
-    Value* Stride = ConstantInt::get(i64_t, 4);
-    Function* F = M.getFunction("$s10SwiftToPTX16getDevicePointerys6UInt64VSv_S2itF");
-    CallInst* Inew = CallInst::Create(F->getFunctionType(), F, {P, Count, Stride});
+    // Get a pointer to the data that is accessible from the device
+    Value* Addr = I->getPointerOperand();
+    Instruction* Inew = GetDevicePointer(Context, M, Addr, I);
     ReplaceInstWithInst(I, Inew);
 
     // In the function epilogue we check that the pointer address that was
     // stored in the closure environment is the same as after the closure was
     // executed. Presumably this signals that some error occurred (buffer
     // overrun, stack clobbering, ...?) in which case the function will SIGTRAP.
-    /* for (auto U : P->users()) { */
-    for (auto U = P->user_begin(), UE = P->user_end(); U != UE; /* See: [1] */) {
+    for (auto U = Addr->user_begin(), UE = Addr->user_end(); U != UE; /* See: [1] */) {
       Value *V = *U++;
 
       if (V == Inew)
@@ -906,6 +1061,33 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDACon
     }
   }
 
+  // Calls to llvm.lifetime.{start,end}---which manage stack allocation
+  // lifetimes---will be replaced with calls to our caching pinned (heap) memory
+  // allocator.
+  else if (CallInst *I = dyn_cast<CallInst>(P)) {
+    if (Function* F = I->getCalledFunction()) {
+      StringRef Name = F->getName();
+      if (Name.starts_with("llvm.lifetime.start")) {
+        // Assume that we will encounter the corresponding .end()
+        ToErase.push_back(I);
+      }
+      else if (Name.starts_with("llvm.lifetime.end")) {
+        // Assume that we will encounter the corresponding .start()
+        Value *Alloca = I->getArgOperand(1);
+        Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
+        CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, Allocator._0, Allocator._1, Allocator._2});
+        Free->setCallingConv(CallingConv::Swift);
+        Free->insertAfter(I);
+        ToFree.erase(Alloca);
+        ToErase.push_back(I);
+      }
+    }
+  }
+
+  else if (LoadInst *I = dyn_cast<LoadInst>(P)) {
+    // Nothing
+  }
+
   else {
     LLVM_DEBUG(dbgs() << "UpdateClosureEnvironment: unhandled instruction: " << *P << "\n");
   }
@@ -915,14 +1097,14 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDACon
 // setup and finalisation. The other overload of this function is the recursive
 // one that does all the hard work.
 //
-void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDAContext CUDA, CachingHostAllocator Allocator, Value* Event)
+void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* Body, Value* Env, CUDAContext CUDA, CachingHostAllocator Allocator, Value* Event)
 {
   SmallVector<Instruction*> ToErase;
   SmallPtrSet<Value*, 8> ToFree;
-  Function *Parent = cast<Instruction>(P)->getFunction();
+  Function *Parent = cast<Instruction>(Env)->getFunction();
 
   // Recursively marshal the closure environment to device-accessible memory
-  UpdateClosureEnvironment(Context, M, P, CUDA, Allocator, Event, ToErase, ToFree);
+  UpdateClosureEnvironment(Context, M, Body, Env, CUDA, Allocator, Event, ToErase, ToFree);
 
   // Erase any instructions that we couldn't remove along the way (instructions
   // that might be part of the users() chain).
@@ -990,7 +1172,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDACon
     Instruction* Release2 = nullptr;
 
     // Locate the pre- and post-dominating instructions
-    for (auto U : Allocator._0->users()) {
+    for (auto *U : Allocator._0->users()) {
       if (Instruction* I = dyn_cast<Instruction>(U)) {
         if (CallInst* CI = dyn_cast<CallInst>(I)) {
           if (CI->getCalledFunction()->getName().equals("swift_release")) {
@@ -1054,7 +1236,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* P, CUDACon
   // Also ensure we don't swift_release the ready event too early
   Instruction* Lowest = nullptr;
   Instruction* Release = nullptr;
-  for (auto U : Event->users()) {
+  for (auto *U : Event->users()) {
     if (Instruction* I = dyn_cast<Instruction>(U)) {
       if (CallInst* CI = dyn_cast<CallInst>(I)) {
         if (CI->getCalledFunction()->getName().equals("swift_release")) {
@@ -1105,7 +1287,7 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
   // Iterate over all uses of the `parallel_for(iterations: body:)` function
   for (auto U = Fseq->user_begin(), UE = Fseq->user_end(); U != UE; /* See: [1] */) {
     // NOTE [1]: Update the iterator to point to the next User already, because
-    // we might modify this instruction, which will break the iterator.
+    // we might modify this instruction and thus break the sequence.
     Value* V = *U++;
 
     if (CallInst *CI = dyn_cast<CallInst>(V)) {
@@ -1200,7 +1382,7 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
 
       // Update the closure environment so that its contents are accessible from
       // the device.
-      UpdateClosureEnvironment(Context, M, Env, { Context0, Context1, Context2 }, { Allocator0, Allocator1, Allocator2 }, CIpar);
+      UpdateClosureEnvironment(Context, M, Body, Env, { Context0, Context1, Context2 }, { Allocator0, Allocator1, Allocator2 }, CIpar);
     }
   }
 
@@ -1224,6 +1406,8 @@ llvm::PassPluginLibraryInfo getParallelForPluginInfo()
         PB.registerOptimizerLastEPCallback(
             [](ModulePassManager &PM, OptimizationLevel O) {
               PM.addPass(ParallelForPass());
+              PM.addPass(createModuleToFunctionPassAdaptor(GVNPass()));
+              PM.addPass(createModuleToFunctionPassAdaptor(InstCombinePass()));
             });
       }
     };
