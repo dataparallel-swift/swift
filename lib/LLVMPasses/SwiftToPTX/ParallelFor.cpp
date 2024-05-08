@@ -30,7 +30,10 @@
 #include <llvm/Transforms/Scalar/GVN.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
+
 #include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 using namespace llvm;
 
@@ -41,6 +44,10 @@ namespace {
 static cl::opt<bool> KeepIntermediateFiles (
   "lift-to-ptx-keep-intermediate-files", cl::Hidden, cl::init(false),
   cl::desc("Keep intermediate files of lift-to-ptx pass"));
+
+static cl::opt<StringRef> PTXASPath (
+  "lift-to-ptx-ptxas-path", cl::Hidden, cl::init("/usr/local/cuda/bin/ptxas"),
+  cl::desc("Path to the ptxas executable"));
 
 static cl::opt<StringRef> TargetGPU (
   "lift-to-ptx-target-gpu", cl::Hidden, cl::init("sm_87"),  // default: Orin
@@ -485,6 +492,134 @@ public:
 };
 #endif
 
+// Compile the given PTX assembly code into SASS object code. This will call out
+// to 'ptxas' in order to do the work, piping the data in and out via pipes and
+// thus avoiding the creating of temporary files on disk.
+//
+// The returned memory is owned by the caller, who is expected to eventually
+// call free() on the underlying data once it is no longer required.
+ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
+{
+  int fd0[2]; // stdin
+  int fd1[2]; // stdout
+  int fd2[2]; // stderr
+
+  if ( pipe(fd0) < 0 || pipe(fd1) < 0 || pipe(fd2) < 0) {
+    report_fatal_error("pipe error", false);
+  }
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    report_fatal_error("fork() error", false);
+  }
+
+  if (pid == 0) {
+    // CHILD PROCESS
+    close(fd0[1]);
+    close(fd1[0]);
+    close(fd2[0]);
+
+    if (fd0[0] != STDIN_FILENO) {
+      if (dup2(fd0[0], STDIN_FILENO) != STDIN_FILENO) {
+        LLVM_DEBUG(dbgs() << "dup2() error on stdin\n");
+      }
+      close(fd0[0]);
+    }
+
+    if (fd1[1] != STDOUT_FILENO) {
+      if (dup2(fd1[1], STDOUT_FILENO) != STDOUT_FILENO) {
+        LLVM_DEBUG(dbgs() << "dup2() error on stdout\n");
+      }
+      close(fd1[1]);
+    }
+
+    if (fd2[1] != STDERR_FILENO) {
+      if (dup2(fd2[1], STDERR_FILENO) != STDERR_FILENO) {
+        LLVM_DEBUG(dbgs() << "dup2() error on stderr\n");
+      }
+      close(fd2[1]);
+    }
+
+    // Replace the current process image. If this returns then an error has occurred.
+    const char* const argv[] =
+      { PTXASPath.data()
+      , "--verbose"
+      , "-arch", TargetGPU.data()
+      , "-o", "/dev/stdout"       // send the output to stdout pipe
+      , "-"                       // read input from stdin pipe
+      , nullptr
+      };
+    execv(PTXASPath.data(), (char* const*) argv);
+    report_fatal_error("execv() failed", false);
+  }
+  else {
+    // PARENT PROCESS
+    close(fd0[0]);
+    close(fd1[1]);
+    close(fd2[1]);
+
+    if (write(fd0[1], Asm.data(), Asm.size()) != Asm.size()) {
+      report_fatal_error("failed to write data to pipe", false);
+    }
+    close(fd0[1]); // send EOF
+
+    // Read data from the connected pipes
+    size_t   capacity   = 65536;
+    uint8_t* obj_buffer = (uint8_t*) malloc(capacity); // 64KB
+    char*    msg_buffer = (char*)    malloc(capacity); // overkill
+
+    // Read in the compiled object code
+    size_t offset = 0;
+    while (true) {
+      ssize_t rv = read(fd1[0], obj_buffer + offset, capacity - offset);
+      if (rv == 0)
+        break;  // child closed pipe
+
+      if (rv < 0)
+        report_fatal_error("pipe error", false);
+
+      offset += rv;
+      assert(offset < capacity);
+    }
+    ArrayRef<uint8_t> obj = ArrayRef(obj_buffer, offset);
+
+    // Read in any error/warning messages
+    offset = 0;
+    while (true) {
+      ssize_t rv = read(fd2[0], msg_buffer + offset, capacity - offset);
+      if (rv == 0)
+        break;  // child closed pipe
+
+      if (rv < 0)
+        report_fatal_error("pipe error", false);
+
+      offset += rv;
+      assert(offset < capacity);
+    }
+    StringRef msg = StringRef(msg_buffer, offset);
+
+    // Get the exit status of the process
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+      report_fatal_error("ptxas exited with code " + Twine(WEXITSTATUS(status)) + " :\n" + msg, false);
+    }
+
+    if (WIFSIGNALED(status)) {
+      report_fatal_error("ptxas received signal " + Twine(WTERMSIG(status)) + (WCOREDUMP(status) ? " (core dumped)" : ""), false);
+    }
+
+    // normal termination
+    assert(status == 0);
+
+    LLVM_DEBUG(dbgs() << msg);
+    free(msg_buffer);
+
+    return obj;
+  }
+}
+
 // Create a new parallel_for GPU kernel consisting of the given set of
 // functions. The generated kernel code is returned.
 //
@@ -495,7 +630,7 @@ public:
 // we cleanly separate this we should be able to compile multiple units
 // concurrently, which could be useful.
 //
-SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVMContext& Context)
+ArrayRef<uint8_t> CreateKernel(LLVMContext& Context, StringRef Main, SetVector<GlobalValue*> GVs)
 {
   SMDiagnostic Err;
   std::unique_ptr<Module> M = parseAssembly(parallel_for_kernel, Err, Context);
@@ -619,17 +754,19 @@ SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVM
   SmallVector<char> Asm;  // XXX: reserve space to avoid growing too frequently?
   raw_svector_ostream ostream(Asm);
   if (TargetMachine->addPassesToEmitFile(legacy, ostream, nullptr, CGFT_AssemblyFile)) {
-    report_fatal_error("could not emit output file", false);
+    report_fatal_error("could not create output stream", false);
   }
   legacy.run(*M);
 
+  // Compile the target assembly to object code. This calls out to ptxas to do
+  // the work, piping the data in and out via pipes and thus avoiding the
+  // creation of temporary files on disk.
+  ArrayRef<uint8_t> Obj = CompileKernel(Asm);
+
   // ===== DEBUGGING =====
 
-  // Since we are processing as much as possible in-memory, in order to
-  // "keep" intermediate files, we actually need to write them to disk for
-  // the first time. The only exception to this will be once we are piping
-  // the generated PTX through ptxas, since that will always store its
-  // result to a file on disk.
+  // Since we are processing completely in-memory, in order to "keep"
+  // intermediate files, we need to write them to disk for the first time.
   if (KeepIntermediateFiles) {
     int src_fd = 0;
     SmallVector<char> src_path;
@@ -646,18 +783,28 @@ SmallVector<char> CreateKernel(StringRef Main, SetVector<GlobalValue*> GVs, LLVM
     src_out.close();
     errs() << src_path << "\n";
 
+    int ptx_fd = 0;
+    SmallVector<char> ptx_path;
+    if (sys::fs::createTemporaryFile("kernel", "ptx", ptx_fd, ptx_path)) {
+      report_fatal_error("Failed to create output file", false);
+    }
+    auto ptx_out = raw_fd_ostream(ptx_fd, true);
+    ptx_out << Asm;
+    ptx_out.close();
+    errs() << ptx_path << "\n";
+
     int obj_fd = 0;
     SmallVector<char> obj_path;
-    if (sys::fs::createTemporaryFile("kernel", "ptx", obj_fd, obj_path)) {
+    if (sys::fs::createTemporaryFile("kernel", "sass", obj_fd, obj_path)) {
       report_fatal_error("Failed to create output file", false);
     }
     auto obj_out = raw_fd_ostream(obj_fd, true);
-    obj_out << Asm;
+    obj_out.write((const char*) Obj.data(), Obj.size());
     obj_out.close();
     errs() << obj_path << "\n";
   }
 
-  return Asm;
+  return Obj;
 }
 
 // Swift will apply scalar replacement of aggregates in order to pass struct
@@ -1354,14 +1501,14 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
 
       // Generate PTX assembly for the (set of) functions called by the
       // `parallel_for` launcher, and embed the generated code into the module
-      SmallVector<char> Asm = CreateKernel(Body->getName(), GVs, Context);
-      size_t buffer_size = Asm.size() + 1;  // include space for null terminator
+      ArrayRef<uint8_t> Obj = CreateKernel(Context, Body->getName(), GVs);
+      size_t buffer_size = Obj.size();
       IntegerType* i8_t = IntegerType::getInt8Ty(Context);
       ArrayType* image_t = ArrayType::get(i8_t, buffer_size);
 
       std::vector<Constant*> KernelData(buffer_size);
-      std::transform(Asm.begin(), Asm.end(), KernelData.begin(), [&](char c) { return ConstantInt::get(i8_t, c); });
-      KernelData.back() = ConstantInt::get(i8_t, 0);
+      std::transform(Obj.begin(), Obj.end(), KernelData.begin(), [&](uint8_t c) { return ConstantInt::get(i8_t, c); });
+      free((void*) Obj.data()); // ArrayRef does not own the underlying buffer
 
       GlobalVariable* Image = new GlobalVariable(M, image_t, true,
           GlobalValue::InternalLinkage,
