@@ -753,7 +753,7 @@ ArrayRef<uint8_t> CreateKernel(LLVMContext& Context, StringRef Main, SetVector<G
   legacy::PassManager legacy;
   SmallVector<char> Asm;  // XXX: reserve space to avoid growing too frequently?
   raw_svector_ostream ostream(Asm);
-  if (TargetMachine->addPassesToEmitFile(legacy, ostream, nullptr, CGFT_AssemblyFile)) {
+  if (TargetMachine->addPassesToEmitFile(legacy, ostream, nullptr, CodeGenFileType::AssemblyFile)) {
     report_fatal_error("could not create output stream", false);
   }
   legacy.run(*M);
@@ -795,7 +795,7 @@ ArrayRef<uint8_t> CreateKernel(LLVMContext& Context, StringRef Main, SetVector<G
 
     int obj_fd = 0;
     SmallVector<char> obj_path;
-    if (sys::fs::createTemporaryFile("kernel", "sass", obj_fd, obj_path)) {
+    if (sys::fs::createTemporaryFile("kernel", "o", obj_fd, obj_path)) {
       report_fatal_error("Failed to create output file", false);
     }
     auto obj_out = raw_fd_ostream(obj_fd, true);
