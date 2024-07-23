@@ -82,6 +82,7 @@ target_link_libraries(swiftIRGen INTERFACE
 target_link_libraries(swiftIRGen PRIVATE
   swiftAST
   swiftLLVMPasses
+  swiftLLVMPassesSwiftToPTX
   swiftSIL
   swiftSILGen
   swiftSILOptimizer)
