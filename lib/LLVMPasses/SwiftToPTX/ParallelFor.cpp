@@ -681,16 +681,22 @@ std::string makeValidUnquotedName(StringRef Name)
 }
 #endif
 
-StringRef getGlobalInitializerString(Value* Value)
+std::optional<StringRef> getGlobalInitializerString(Value* Value)
 {
-  auto C = cast<ConstantExpr>(Value);
-  auto I = cast<PtrToIntInst>(C->getAsInstruction());
-  auto G = cast<GlobalVariable>(I->getPointerOperand());
-  auto D = cast<ConstantDataSequential>(G->getInitializer());
-  auto S = D->getAsCString();
+  std::optional<StringRef> R = {};
 
-  delete I; // getAsInstruction() creates a parent-less instruction
-  return S;
+  if (auto C = dyn_cast<ConstantExpr>(Value)) {
+    if (auto I = dyn_cast<PtrToIntInst>(C->getAsInstruction())) {
+      if (auto G = dyn_cast<GlobalVariable>(I->getPointerOperand())) {
+        if (auto D = dyn_cast<ConstantDataSequential>(G->getInitializer())) {
+          R = D->getAsCString();
+        }
+      }
+      delete I; // getAsInstruction() creates a parent-less instruction
+    }
+  }
+
+  return R;
 }
 
 GlobalValue* newStaticString(LLVMContext& Context, Module& Module, std::string String)
@@ -811,8 +817,8 @@ ArrayRef<uint8_t> CreateKernel
 
         auto __assertfail = M->getFunction("__assertfail");
         CallInst* CINew = CallInst::Create(__assertfail->getFunctionType(), __assertfail,
-            { newStaticString(Context, *M, Prefix.str() + ": " + Message.str())
-            , newStaticString(Context, *M, File.str())
+            { newStaticString(Context, *M, Prefix->str() + (Message ? ": " + Message->str() : ""))
+            , newStaticString(Context, *M, File->str())
             , ConstantInt::get(IntegerType::getInt32Ty(Context), Line)
             , newStaticString(Context, *M, demangleSymbolAsString(CI->getCaller()->getName(), swift::Demangle::DemangleOptions()))
             , ConstantInt::get(IntegerType::getInt64Ty(Context), 1)
