@@ -951,9 +951,21 @@ Value* GetArrayTypeDictionary(LLVMContext& Context, Module& M, Value* P)
 {
   if (CallInst* I = dyn_cast<CallInst>(P)) {
     if (Function* F = I->getCalledFunction()) {
-      if (F->getName().equals("$sSa28_allocateBufferUninitialized15minimumCapacitys016_ContiguousArrayB0VyxGSi_tFZ")) {
+      // static Swift.Array._allocateBufferUninitialized(minimumCapacity: Swift.Int) -> Swift._ContiguousArrayBuffer<A>
+      if (F->getName() == "$sSa28_allocateBufferUninitialized15minimumCapacitys016_ContiguousArrayB0VyxGSi_tFZ")
         return I->getOperand(1);
-      }
+
+      // generic specialization <Swift.Float> of static Swift.Array._allocateUninitialized(Swift.Int) -> ([A], Swift.UnsafeMutablePointer<A>)
+      if (F->getName() == "$sSa22_allocateUninitializedySayxG_SpyxGtSiFZSf_Tgm5")
+        return M.getGlobalVariable("$sSfN");
+
+      // generic specialization <Swift.Float> of Swift._ContiguousArrayBuffer._consumeAndCreateNew() -> Swift._ContiguousArrayBuffer<A>
+      if (F->getName() == "$ss22_ContiguousArrayBufferV20_consumeAndCreateNewAByxGyFSf_Tg5")
+        return M.getGlobalVariable("$sSfN");
+
+      // merged generic specialization <Swift.Float> of static Swift.Array._allocateUninitialized(Swift.Int) -> ([A], Swift.UnsafeMutablePointer<A>)
+      if (F->getName() == "$sSa22_allocateUninitializedySayxG_SpyxGtSiFZSf_Tgm5Tm")
+        return M.getGlobalVariable("$sSfN");
     }
   }
 
@@ -961,22 +973,15 @@ Value* GetArrayTypeDictionary(LLVMContext& Context, Module& M, Value* P)
     return GetArrayTypeDictionary(Context, M, I->getPointerOperand());
   }
 
+  else if (ExtractValueInst* I = dyn_cast<ExtractValueInst>(P)) {
+    return GetArrayTypeDictionary(Context, M, I->getAggregateOperand());
+  }
+
   else if (PHINode* I = dyn_cast<PHINode>(P)) {
     const unsigned int N = I->getNumIncomingValues();
     for (unsigned int i = 0; i < N; ++i) {
       if (Value* R = GetArrayTypeDictionary(Context, M, I->getIncomingValue(i))) {
         return R;
-      }
-    }
-  }
-
-  else if (ExtractValueInst* I1 = dyn_cast<ExtractValueInst>(P)) {
-    if (CallInst* I2 = dyn_cast<CallInst>(I1->getAggregateOperand())) {
-      if (Function* F = I2->getCalledFunction()) {
-        // generic specialization <Swift.Float> of static Swift.Array._allocateUninitialized(Swift.Int) -> ([A], Swift.UnsafeMutablePointer<A>)
-        if (F->getName().equals("$sSa22_allocateUninitializedySayxG_SpyxGtSiFZSf_Tgm5")) {
-          return M.getGlobalVariable("$sSfN");
-        }
       }
     }
   }
@@ -1270,11 +1275,11 @@ void UpdateClosureEnvironment (
     // [Free 1]: Check for an llvm.stacksave() instruction
     if (auto *Prev = dyn_cast<Instruction>(NewI)->getPrevNonDebugInstruction()) {
       if (CallInst *Save = dyn_cast<CallInst>(Prev)) {
-        if (Save->getCalledFunction()->getName().equals("llvm.stacksave")) {
+        if (Save->getCalledFunction()->getName() == "llvm.stacksave") {
           assert(Save->hasOneUser() && "expected llvm.stacksave() to have a single unique undroppable user");
 
           auto *Restore = cast<Instruction>(Save->getUniqueUndroppableUser());
-          assert(cast<CallInst>(Restore)->getCalledFunction()->getName().equals("llvm.stackrestore"));
+          assert(cast<CallInst>(Restore)->getCalledFunction()->getName() == "llvm.stackrestore");
 
           Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
           CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI, Event, Allocator._0, Allocator._1, Allocator._2});
@@ -1501,13 +1506,13 @@ void UpdateClosureEnvironment (
     for (auto *U : Allocator._0->users()) {
       if (Instruction* I = dyn_cast<Instruction>(U)) {
         if (CallInst* CI = dyn_cast<CallInst>(I)) {
-          if (CI->getCalledFunction()->getName().equals("swift_release")) {
+          if (CI->getCalledFunction()->getName() == "swift_release") {
             assert(!Release0 && "expected a single call to swift_release");
             Release0 = I;
             Release1 = Release0->getPrevNonDebugInstruction();
             Release2 = Release1->getPrevNonDebugInstruction();
-            assert(cast<CallInst>(Release1)->getCalledFunction()->getName().equals("swift_release"));
-            assert(cast<CallInst>(Release2)->getCalledFunction()->getName().equals("swift_release"));
+            assert(cast<CallInst>(Release1)->getCalledFunction()->getName() == "swift_release");
+            assert(cast<CallInst>(Release2)->getCalledFunction()->getName() == "swift_release");
             continue;
           }
         }
@@ -1565,7 +1570,7 @@ void UpdateClosureEnvironment (
   for (auto *U : Event->users()) {
     if (Instruction* I = dyn_cast<Instruction>(U)) {
       if (CallInst* CI = dyn_cast<CallInst>(I)) {
-        if (CI->getCalledFunction()->getName().equals("swift_release")) {
+        if (CI->getCalledFunction()->getName() == "swift_release") {
           Release = I;
           continue;
         }
