@@ -5,21 +5,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_TRANSFORMS_PARALLELFOR_H
-#define LLVM_TRANSFORMS_PARALLELFOR_H
+#ifndef SWIFT_LLVMPASSES_SWIFT2PTX_PARALLELFOR_H
+#define SWIFT_LLVMPASSES_SWIFT2PTX_PARALLELFOR_H
 
-#include <llvm/IR/PassManager.h>
+#include "llvm/IR/PassManager.h"
 
-namespace llvm {
+namespace swift {
 
-class Module;
-
-struct ParallelForPass : public PassInfoMixin<ParallelForPass> {
+struct ParallelForPass : public llvm::PassInfoMixin<ParallelForPass> {
 public:
-  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+  llvm::PreservedAnalyses run(llvm::Module &M,
+                              llvm::ModuleAnalysisManager &AM);
 };
 
-} // namespace llvm
+} // namespace swift
 
-#endif // LLVM_TRANSFORMS_PARALLELFOR_H
+#endif // SWIFT_LLVMPASSES_SWIFT2PTX_PARALLELFOR_H
 

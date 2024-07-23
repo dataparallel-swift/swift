@@ -2,34 +2,40 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Transforms/ParallelFor.h"
+#include "swift/LLVMPasses/SwiftToPTX/ParallelFor.h"
+#include "swift/Demangling/Demangle.h"
 
-#include <llvm/ADT/SetVector.h>
-#include <llvm/ADT/SmallVector.h>
-#include <llvm/ADT/StringMap.h>
-#include <llvm/AsmParser/Parser.h>
-#include <llvm/Bitcode/BitcodeReader.h>
-#include <llvm/IR/Attributes.h>
-#include <llvm/IR/Constants.h>
-#include <llvm/IR/Function.h>
-#include <llvm/IR/GlobalValue.h>
-#include <llvm/IR/LegacyPassManager.h>
-#include <llvm/IR/PassManager.h>
-#include <llvm/IRPrinter/IRPrintingPasses.h>
-#include <llvm/Linker/Linker.h>
-#include <llvm/MC/TargetRegistry.h>
-#include <llvm/Passes/PassBuilder.h>
-#include <llvm/Passes/PassPlugin.h>
-#include <llvm/Support/CommandLine.h>
-#include <llvm/Support/Debug.h>
-#include <llvm/Support/Error.h>
-#include <llvm/Support/FileSystem.h>
-#include <llvm/Target/TargetMachine.h>
-#include <llvm/Target/TargetOptions.h>
-#include <llvm/Transforms/InstCombine/InstCombine.h>
-#include <llvm/Transforms/Scalar/GVN.h>
-#include <llvm/Transforms/Utils/BasicBlockUtils.h>
-#include <llvm/Transforms/Utils/Cloning.h>
+#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/AsmParser/Parser.h"
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/IRPrinter/IRPrintingPasses.h"
+#include "llvm/Linker/Linker.h"
+#include "llvm/MC/MCAsmInfo.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/PassPlugin.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Target/TargetOptions.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 #include <stdlib.h>
 #include <unistd.h>
@@ -37,25 +43,25 @@
 
 using namespace llvm;
 
-#define DEBUG_TYPE "lift-to-ptx"
+#define DEBUG_TYPE "swift-to-ptx"
 
 namespace {
 
 static cl::opt<bool> KeepIntermediateFiles (
-  "lift-to-ptx-keep-intermediate-files", cl::Hidden, cl::init(false),
-  cl::desc("Keep intermediate files of lift-to-ptx pass"));
+  "swift-to-ptx-keep-intermediate-files", cl::Hidden, cl::init(false),
+  cl::desc("Keep intermediate files of swift-to-ptx pass"));
 
 static cl::opt<StringRef> PTXASPath (
-  "lift-to-ptx-ptxas-path", cl::Hidden, cl::init("/usr/local/cuda/bin/ptxas"),
+  "swift-to-ptx-ptxas-path", cl::Hidden, cl::init("/usr/local/cuda/bin/ptxas"),
   cl::desc("Path to the ptxas executable"));
 
 static cl::opt<StringRef> TargetGPU (
-  "lift-to-ptx-target-gpu", cl::Hidden, cl::init("sm_87"),  // default: Orin
-  cl::desc("Target a specific GPU architecture in lift-to-ptx pass"));
+  "swift-to-ptx-target-gpu", cl::Hidden, cl::init("sm_87"),   // default: Orin
+  cl::desc("Target a specific GPU architecture in swift-to-ptx pass"));
 
 static cl::opt<StringRef> TargetFeatures (
-  "lift-to-ptx-target-attr", cl::Hidden, cl::init(""),
-  cl::desc("Target specific attributes in lift-to-ptx pass"));
+  "swift-to-ptx-target-attr", cl::Hidden, cl::init(""),  // default: +ptx75 (llvm-17 produces assembly using features from this version no matter what)
+  cl::desc("Target specific attributes in swift-to-ptx pass"));
 
 static const MemoryBufferRef parallel_for_kernel = MemoryBufferRef(R"KERNEL(
 ; ModuleID = '<parallel_for_kernel>'
@@ -104,9 +110,18 @@ declare i32 @llvm.nvvm.read.ptx.sreg.nctaid.x() #1
 ; Function Attrs: nofree nosync nounwind readnone
 declare i32 @llvm.nvvm.read.ptx.sreg.ntid.x() #1
 
+; Function Attrs: convergent nounwind
+declare void @__assertfail(ptr noundef, ptr noundef, i32 noundef, ptr noundef, i64 noundef) #3
+;                           │            │            │            │            ╰────── character size in bytes (must be 1)
+;                           │            │            │            ╰─────────────────── function name string
+;                           │            │            ╰──────────────────────────────── line number
+;                           │            ╰───────────────────────────────────────────── file name
+;                           ╰────────────────────────────────────────────────────────── message
+
 attributes #0 = { argmemonly nofree nosync nounwind }
 attributes #1 = { nofree nosync nounwind readnone }
 attributes #2 = { nounwind readnone }
+attributes #3 = { convergent nounwind }
 
 !nvvm.annotations = !{!0}
 
@@ -128,31 +143,31 @@ target triple = "aarch64-unknown-linux-gnu"
 ; SwiftToPTX.CachingHostAllocator.alloc(Swift.Int) -> Swift.UnsafeMutableRawPointer
 declare swiftcc ptr @"$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF"(i64, ptr, ptr, ptr) local_unnamed_addr #0
 ;                                                                         │    ╰────┬────╯
-;                                                                         │         ╰───────── caching host allocator state
+;                                                                         │         ╰───────── SwiftToPTX.CachingHostAllocator
 ;                                                                         ╰─────────────────── size in bytes
 
 ; SwiftToPTX.CachingHostAllocator.free(Swift.UnsafeMutableRawPointer, SwiftToPTX.Event) -> ()
 declare swiftcc void @"$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF"(ptr, ptr, ptr, ptr, ptr) local_unnamed_addr #0
 ;                                                                                   │    │    ╰────┬────╯
-;                                                                                   │    │         ╰───────── caching host allocator state
+;                                                                                   │    │         ╰───────── SwiftToPTX.CachingHostAllocator
 ;                                                                                   │    ╰─────────────────── ready event
 ;                                                                                   ╰──────────────────────── pointer to free
 
 ; SwiftToPTX.parallel_for(iterations: Swift.Int, context: SwiftToPTX.Context, allocator: SwiftToPTX.CachingHostAllocator, stream: SwiftToPTX.Stream, _: (Swift.Int) -> ()) -> SwiftToPTX.Event
 declare swiftcc ptr @"$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventCSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtF"(i64, ptr, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr) local_unnamed_addr #0
-;                                                                                                                                                           │     ╰────┬────╯   ╰────┬────╯    │    │    ╰──── eclosure nvironment
+;                                                                                                                                                           │     ╰────┬────╯   ╰────┬────╯    │    │    ╰──── closure environment
 ;                                                                                                                                                           │          │             │         │    ╰───────── body of the parallel_for loop
-;                                                                                                                                                           │          │             │         ╰────────────── exeution stream
-;                                                                                                                                                           │          │             ╰──────────────────────── caching host allocator state
-;                                                                                                                                                           │          ╰────────────────────────────────────── CUDA context state
-;                                                                                                                                                           ╰───────────────────────────────────────────────── pointer to free
+;                                                                                                                                                           │          │             │         ╰────────────── execution stream
+;                                                                                                                                                           │          │             ╰──────────────────────── SwiftToPTX.CachingHostAllocator
+;                                                                                                                                                           │          ╰────────────────────────────────────── SwiftToPTX.Context
+;                                                                                                                                                           ╰───────────────────────────────────────────────── iterations
 
 ; SwiftToPTX.launch_parallel_for(iterations: Swift.Int, kernel: inout SwiftToPTX.ParallelForKernel, env: Swift.UnsafeMutableRawPointer, context: SwiftToPTX.Context, stream: SwiftToPTX.Stream) -> SwiftToPTX.Event
 declare swiftcc ptr @"$s10SwiftToPTX19launch_parallel_for10iterations6kernel3env7context6streamAA5EventCSi_AA17ParallelForKernelVzSvAA7ContextVAA6StreamVtF"(i64, ptr nocapture dereferenceable(32), ptr, ptr, i64, i64, ptr) local_unnamed_addr #0
-;                                                                                                                                                             │    │                                  │    ╰────┬────╯    ╰──── closure environment (updated to be GPU accessible)
-;                                                                                                                                                             │    │                                  │         ╰────────────── CUDA context state
-;                                                                                                                                                             │    │                                  ╰──────────────────────── closure environment
-;                                                                                                                                                             │    ╰─────────────────────────────────────────────────────────── ParallelForKernel struct
+;                                                                                                                                                             │    │                                  │    ╰────┬────╯    ╰──── execution stream
+;                                                                                                                                                             │    │                                  │         ╰────────────── SwiftToPTX.Context
+;                                                                                                                                                             │    │                                  ╰──────────────────────── closure environment (updated to be GPU accessible)
+;                                                                                                                                                             │    ╰─────────────────────────────────────────────────────────── SwiftToPTX.ParallelForKernel struct
 ;                                                                                                                                                             ╰──────────────────────────────────────────────────────────────── iterations
 
 ; SwiftToPTX.getDevicePointer<A>(Swift.UnsafeMutablePointer<A>, Swift.Int) -> Swift.UInt64
@@ -333,7 +348,7 @@ void LinkInLibdeviceModule(Module &M, LLVMContext &Context)
   SMDiagnostic Err;
   std::unique_ptr<Module> Lib = LoadLibdeviceModule(Err, Context);
   if (!Lib) {
-    Err.print("lift-to-ptx<parallel_for>", errs());
+    Err.print("swift-to-ptx<parallel_for>", errs());
     exit(1);
   }
 
@@ -357,7 +372,7 @@ void LinkInHostSupportCode(Module &M, LLVMContext &Context)
   SMDiagnostic Err;
   std::unique_ptr<Module> M2 = parseAssembly(host_support, Err, Context);
   if (!M2) {
-    Err.print("lift-to-ptx<parallel_for>", errs());
+    Err.print("swift-to-ptx<parallel_for>", errs());
     exit(1);
   }
 
@@ -494,10 +509,15 @@ public:
 
 // Compile the given PTX assembly code into SASS object code. This will call out
 // to 'ptxas' in order to do the work, piping the data in and out via pipes and
-// thus avoiding the creating of temporary files on disk.
+// thus avoiding the creation of temporary files on disk.
 //
 // The returned memory is owned by the caller, who is expected to eventually
 // call free() on the underlying data once it is no longer required.
+//
+// TODO: The CUDA toolkit now provides an API for calling into 'ptxas'. That may
+// be simpler than this method, but we should test if it is actually better
+// (e.g. avoids temporary files) as well.
+//
 ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
 {
   int fd0[2]; // stdin
@@ -549,7 +569,7 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
       , "-"                       // read input from stdin pipe
       , nullptr
       };
-    execv(PTXASPath.data(), (char* const*) argv);
+    execv(PTXASPath.data(), const_cast<char* const*>(argv));
     report_fatal_error("execv() failed", false);
   }
   else {
@@ -558,7 +578,7 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
     close(fd1[1]);
     close(fd2[1]);
 
-    if (write(fd0[1], Asm.data(), Asm.size()) != Asm.size()) {
+    if (write(fd0[1], Asm.data(), Asm.size()) != static_cast<ssize_t>(Asm.size())) {
       report_fatal_error("failed to write data to pipe", false);
     }
     close(fd0[1]); // send EOF
@@ -620,6 +640,68 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
   }
 }
 
+#if false
+bool isAcceptableChar(char c) {
+  return isAlnum(c) || c == '_' || c == '$' || c == '.' || c == '@';
+}
+
+bool isValidUnquotedName(StringRef Name) {
+  assert (!Name.empty());
+
+  for (auto c : Name) {
+    if (!isAcceptableChar(c))
+      return false;
+  }
+
+  return true;
+}
+
+std::string makeValidUnquotedName(StringRef Name)
+{
+  // Avoid the extra allocation if possible
+  if (isValidUnquotedName(Name))
+    return Name.str();
+
+  std::string Encoded;
+  Encoded.reserve(Name.size());
+
+  for (auto c : Name) {
+    if (isAcceptableChar(c)) {
+      Encoded.push_back(c);
+    } else {
+      if (c == ' ') {
+        Encoded.push_back('_');
+      } else {
+        Encoded.append(utohexstr(c));
+      }
+    }
+  }
+
+  return Encoded;
+}
+#endif
+
+StringRef getGlobalInitializerString(Value* Value)
+{
+  auto C = cast<ConstantExpr>(Value);
+  auto I = cast<PtrToIntInst>(C->getAsInstruction());
+  auto G = cast<GlobalVariable>(I->getPointerOperand());
+  auto D = cast<ConstantDataSequential>(G->getInitializer());
+  auto S = D->getAsCString();
+
+  delete I; // getAsInstruction() creates a parent-less instruction
+  return S;
+}
+
+GlobalValue* newStaticString(LLVMContext& Context, Module& Module, std::string String)
+{
+  auto C = ConstantDataArray::getString(Context, String);
+  auto G = new GlobalVariable(Module, C->getType(), true, GlobalValue::PrivateLinkage, C);
+  G->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+
+  return G;
+}
+
 // Create a new parallel_for GPU kernel consisting of the given set of
 // functions. The generated kernel code is returned.
 //
@@ -630,44 +712,62 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
 // we cleanly separate this we should be able to compile multiple units
 // concurrently, which could be useful.
 //
-ArrayRef<uint8_t> CreateKernel(LLVMContext& Context, StringRef Main, SetVector<GlobalValue*> GVs)
+ArrayRef<uint8_t> CreateKernel
+(
+    LLVMContext& Context,
+    Module& Src,
+    StringRef Main,
+    SetVector<GlobalValue*> GVs
+)
 {
   SMDiagnostic Err;
   std::unique_ptr<Module> M = parseAssembly(parallel_for_kernel, Err, Context);
   if (!M) {
-    Err.print("lift-to-ptx<parallel_for>", errs());
+    Err.print("swift-to-ptx<parallel_for>", errs());
     exit(1);
   }
 
-  // First just declare all of the functions from the input module which will
-  // make up (or be called by) the loop body. In the next step we will actually
-  // copy over the function bodies.
+  // Loop over all of the functions that we need to copy from the input module.
+  // Just make the declarations, the bodies will come later. Take care of
+  // functions that need to be handled specially on the device.
   ValueToValueMapTy VMap;
+  bool HaveLibdevice = false;
   for (auto &GV : GVs) {
     Function *Src = cast<Function>(GV);
-    Function *Dst = Function::Create(Src->getFunctionType(), Src->getLinkage(), Src->getName(), *M);
+
+    // If this is a declaration for a function provided by libdevice (e.g.
+    // llvm.sin.f32) then link in the libdevice module and record in the VMap the
+    // mapping to the corresponding libdevice implementation (e.g. __nvsinf).
+    //
+    // Delay linking in libdevice to this point where we are certain we need it,
+    // which saves a few hundred ms in case it would not have been used.
+    StringRef Name = Src->getName();
+    StringRef Lib  = libdeviceFunctions.lookup(Name);
+    if (!Lib.empty()) {
+        if (!HaveLibdevice) {
+          LinkInLibdeviceModule(*M, Context);
+          HaveLibdevice = true;
+        }
+        VMap[Src] = M->getFunction(Lib);;
+        continue;
+    }
+
+    // Otherwise, this is just a regular function (declaration). Just make the
+    // declaration, we'll copy over the function body later.
+    Function* Dst = Function::Create(Src->getFunctionType(), Src->getLinkage(), Name, *M);
     Dst->copyAttributesFrom(Src);
     VMap[Src] = Dst;
   }
 
-  // Now, copy over the function bodies.
-  //
-  // At this point we also lower intrinsic functions (e.g. llvm.sin.f32) to the
-  // corresponding libdevice routine (c.f. __nvsinf). We could add all of these
-  // functions to the VMap so that it happens as part of CloneFunctionInto(),
-  // but that requires linking in the lib device module every time, even if it
-  // is not necessary, and this way we can do it lazily, which saves some time
-  // (a few tens of milliseconds, but for small functions this approaches half
-  // of the overall runtime time).
-  //
-  // Also enable floating point contraction for compatible instructions.
-  bool HaveLibdevice = false;
-  for (auto &GV: GVs) {
+  // Copy over the function bodies. Also enable floating point contraction for
+  // compatible instructions.
+  for (auto &GV : GVs) {
     if (GV->isDeclaration())
       continue;
 
     Function *Src = cast<Function>(GV);
-    Function *Dst = M->getFunction(Src->getName());
+    Function *Dst = cast<Function>(VMap[Src]);
+
     Function::arg_iterator DstI = Dst->arg_begin();
     for (const Argument &I : Src->args()) {
       DstI->setName(I.getName());
@@ -681,32 +781,51 @@ ArrayRef<uint8_t> CreateKernel(LLVMContext& Context, StringRef Main, SetVector<G
     Dst->setCallingConv(CallingConv::C);
     Dst->setLinkage(GlobalValue::InternalLinkage);
 
+    if (Src->hasPersonalityFn())
+      Dst->setPersonalityFn(MapValue(Src->getPersonalityFn(), VMap));
+
+    // Allow floating-point contraction (i.e. FMA)
     for (auto &BB : *Dst) {
       for (auto &I : BB) {
-        // Lower intrinsic functions to their libdevice module implementations
-        if (CallInst *CI = dyn_cast<CallInst>(&I)) {
-          if (Function *F = CI->getCalledFunction()) {
-            StringRef target = libdeviceFunctions.lookup(F->getName());
-            if (!target.empty()) {
-              if (!HaveLibdevice) {
-                LinkInLibdeviceModule(*M, Context);
-                HaveLibdevice = true;
-              }
-              CI->setCalledOperand(M->getFunction(target));
-            }
-          }
-        }
-        // Allow floating-point contraction (i.e. FMA)
-        else if (isa<FPMathOperator>(&I)) {
+        if (isa<FPMathOperator>(&I)) {
           I.setHasAllowContract(true);
         }
       }
     }
   }
 
-  // Set the debug info version of this module, otherwise debug info will be
-  // dropped during code generation
-  /* M->addModuleFlag(Module::Error, "Debug Info Version", ...); */
+  // Replace swift error handling functions with equivalents that we can call
+  // from the device
+  if (Function* _fatalErrorMessage = M->getFunction("$ss18_fatalErrorMessage__4file4line5flagss5NeverOs12StaticStringV_A2HSus6UInt32VtF")) {
+    for (auto U = _fatalErrorMessage->user_begin(), UE = _fatalErrorMessage->user_end(); U != UE; ) {
+      Value* V = *U++;
+
+      if (CallInst* CI = dyn_cast<CallInst>(V)) {
+        // The arguments to Swift._fatalErrorMessage are all StaticString, but
+        // we need to first unpack the arguments to get a pointer to the static
+        // string data, and then format the prefix and message parts together.
+        auto Prefix  = getGlobalInitializerString(CI->getArgOperand(0));
+        auto Message = getGlobalInitializerString(CI->getArgOperand(3));
+        auto File    = getGlobalInitializerString(CI->getArgOperand(6));
+        auto Line    = cast<ConstantInt>(CI->getArgOperand(9))->getZExtValue();
+
+        auto __assertfail = M->getFunction("__assertfail");
+        CallInst* CINew = CallInst::Create(__assertfail->getFunctionType(), __assertfail,
+            { newStaticString(Context, *M, Prefix.str() + ": " + Message.str())
+            , newStaticString(Context, *M, File.str())
+            , ConstantInt::get(IntegerType::getInt32Ty(Context), Line)
+            , newStaticString(Context, *M, demangleSymbolAsString(CI->getCaller()->getName(), swift::Demangle::DemangleOptions()))
+            , ConstantInt::get(IntegerType::getInt64Ty(Context), 1)
+            });
+
+        ReplaceInstWithInst(CI, CINew);
+      }
+    }
+  }
+
+  // CUDA-11.4 doesn't understand the PTX-7.5 syntax that LLVM-17 is
+  // (incorrectly) generating for debug information
+  StripDebugInfo(*M);
 
   // Update the kernel function to call the main (entry) function from the set
   // that we extracted in the previous step.
@@ -745,7 +864,7 @@ ArrayRef<uint8_t> CreateKernel(LLVMContext& Context, StringRef Main, SetVector<G
 
   // This corresponds to the typical -O3 optimization pipeline
   ModulePassManager PM = PB.buildPerModuleDefaultPipeline(OptimizationLevel::O3);
-  /* PM.addPass(VerifierPass()); */
+  PM.addPass(VerifierPass());
   PM.run(*M, MAM);
 
   // Generate target assembly. Being a backend/code generation pass, this
@@ -753,7 +872,7 @@ ArrayRef<uint8_t> CreateKernel(LLVMContext& Context, StringRef Main, SetVector<G
   legacy::PassManager legacy;
   SmallVector<char> Asm;  // XXX: reserve space to avoid growing too frequently?
   raw_svector_ostream ostream(Asm);
-  if (TargetMachine->addPassesToEmitFile(legacy, ostream, nullptr, CodeGenFileType::AssemblyFile)) {
+  if (TargetMachine->addPassesToEmitFile(legacy, ostream, nullptr, CGFT_AssemblyFile)) {
     report_fatal_error("could not create output stream", false);
   }
   legacy.run(*M);
@@ -822,7 +941,7 @@ typedef struct SORA3 CUDAContext;
 typedef struct SORA3 CachingHostAllocator;
 
 
-Value* GetArrayTypeDictionary(LLVMContext& Context, Value* P)
+Value* GetArrayTypeDictionary(LLVMContext& Context, Module& M, Value* P)
 {
   if (CallInst* I = dyn_cast<CallInst>(P)) {
     if (Function* F = I->getCalledFunction()) {
@@ -833,14 +952,25 @@ Value* GetArrayTypeDictionary(LLVMContext& Context, Value* P)
   }
 
   else if (GetElementPtrInst* I = dyn_cast<GetElementPtrInst>(P)) {
-    return GetArrayTypeDictionary(Context, I->getPointerOperand());
+    return GetArrayTypeDictionary(Context, M, I->getPointerOperand());
   }
 
   else if (PHINode* I = dyn_cast<PHINode>(P)) {
     const unsigned int N = I->getNumIncomingValues();
     for (unsigned int i = 0; i < N; ++i) {
-      if (Value* R = GetArrayTypeDictionary(Context, I->getIncomingValue(i))) {
+      if (Value* R = GetArrayTypeDictionary(Context, M, I->getIncomingValue(i))) {
         return R;
+      }
+    }
+  }
+
+  else if (ExtractValueInst* I1 = dyn_cast<ExtractValueInst>(P)) {
+    if (CallInst* I2 = dyn_cast<CallInst>(I1->getAggregateOperand())) {
+      if (Function* F = I2->getCalledFunction()) {
+        // generic specialization <Swift.Float> of static Swift.Array._allocateUninitialized(Swift.Int) -> ([A], Swift.UnsafeMutablePointer<A>)
+        if (F->getName().equals("$sSa22_allocateUninitializedySayxG_SpyxGtSiFZSf_Tgm5")) {
+          return M.getGlobalVariable("$sSfN");
+        }
       }
     }
   }
@@ -974,9 +1104,14 @@ Type* GetArrayElementType(LLVMContext& Context, Module& M, Value* P)
 // arriving from a PtrToInt instruction, so need to dig until we get that
 // corresponding IntToPtr, but otherwise the recursive descent method seems like
 // a better way to go...
-Instruction* GetDevicePointer(LLVMContext& Context, Module& M, Value* Addr, Instruction* InsertBefore)
+Instruction* GetDevicePointer (
+    LLVMContext& Context,
+    Module& M,
+    Value* Addr,
+    Instruction* InsertBefore
+)
 {
-  Value* Type = GetArrayTypeDictionary(Context, Addr);
+  Value* Type = GetArrayTypeDictionary(Context, M, Addr);
   Value* Count = GetArrayCount(Context, Addr, InsertBefore);
   Function* F = M.getFunction("$s10SwiftToPTX16getDevicePointerys6UInt64VSpyxG_SitlF");
 
@@ -988,9 +1123,15 @@ Instruction* GetDevicePointer(LLVMContext& Context, Module& M, Value* Addr, Inst
 // Get a device-accessible pointer by analysing the continuation to determine
 // the type and size of the input. Typically we need to compute both the size of
 // the header as well as the number of elements and stride of each element.
-Instruction* GetDevicePointer(LLVMContext& Context, Module& M, Value* Body, Value* Arg, Value* Addr, Instruction* InsertBefore)
+Instruction* GetDevicePointer (
+    LLVMContext& Context,
+    Module& M,
+    Value* Body,
+    Value* Arg,
+    Value* Addr,
+    Instruction* InsertBefore
+)
 {
-  IntegerType* i8_t  = IntegerType::getInt8Ty(Context);
   IntegerType* i64_t = IntegerType::getInt64Ty(Context);
   StructType* ContiguousArrayStorageBase = StructType::getTypeByName(Context, "Ts28__ContiguousArrayStorageBaseC");
 
@@ -1066,7 +1207,17 @@ Instruction* GetDevicePointer(LLVMContext& Context, Module& M, Value* Body, Valu
 // of indirection.
 //
 template <unsigned N>
-void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* K, Value* P, CUDAContext CUDA, CachingHostAllocator Allocator, Value* Event, SmallVector<Instruction*>& ToErase, SmallPtrSet<Value*, N>& ToFree)
+void UpdateClosureEnvironment (
+    LLVMContext& Context,
+    Module& M,
+    Value* K,
+    Value* P,
+    CUDAContext CUDA,
+    CachingHostAllocator Allocator,
+    Value* Event,
+    SmallVector<Instruction*>& ToErase,
+    SmallPtrSet<Value*, N>& ToFree
+)
 {
   /* std::string dots(depth, '.'); */
   /* errs() << dots << *P << "\n"; */
@@ -1258,7 +1409,15 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* K, Value* 
 // setup and finalisation. The other overload of this function is the recursive
 // one that does all the hard work.
 //
-void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* Body, Value* Env, CUDAContext CUDA, CachingHostAllocator Allocator, Value* Event)
+void UpdateClosureEnvironment (
+    LLVMContext& Context,
+    Module& M,
+    Value* Body,
+    Value* Env,
+    CUDAContext CUDA,
+    CachingHostAllocator Allocator,
+    Value* Event
+)
 {
   SmallVector<Instruction*> ToErase;
   SmallPtrSet<Value*, 8> ToFree;
@@ -1425,7 +1584,7 @@ void UpdateClosureEnvironment(LLVMContext& Context, Module& M, Value* Body, Valu
 } // end of anonymous namespace
 
 
-PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
+PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
 {
   LLVMContext &Context = M.getContext();
 
@@ -1436,13 +1595,22 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
     return PreservedAnalyses::all();
   }
 
+  // Required to parse host support textual IR
+  bool DiscardValueNames = Context.shouldDiscardValueNames();
+  Context.setDiscardValueNames(false);
+
+  // Initialise the target machines we require
+  InitializeNativeTarget();
+  LLVMInitializeNVPTXTargetInfo();
+  LLVMInitializeNVPTXTarget();
+  LLVMInitializeNVPTXTargetMC();
+  LLVMInitializeNVPTXAsmPrinter();
+
   // We have found at least one call to parallel_for() that we will convert into
   // a parallel GPU kernel. First, add all the necessary host-side support code.
   LinkInHostSupportCode(M, Context);
 
   Function* Fpar = M.getFunction("$s10SwiftToPTX19launch_parallel_for10iterations6kernel3env7context6streamAA5EventCSi_AA17ParallelForKernelVzSvAA7ContextVAA6StreamVtF");
-  PointerType* ptr_t = PointerType::getUnqual(Context);
-  IntegerType* i32_t = IntegerType::getInt32Ty(Context);
   StructType* kernel_t = StructType::getTypeByName(Context, "T10SwiftToPTX17ParallelForKernelV");
 
   // Iterate over all uses of the `parallel_for(iterations: body:)` function
@@ -1463,35 +1631,27 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
       Value* Body = CI->getArgOperand(8);
       Value* Env = CI->getArgOperand(9);
 
-      GlobalValue* G = dyn_cast<GlobalValue>(Body);
-      if (!G) {
-        // TODO: We should be able to handle other forms; occasionally the
-        // continuation will be passed as part of the closure environment and we
-        // need to extract that by unwinding the environment.
-        report_fatal_error("expected continuation function in call to `parallel_for`", false);
-      }
+      // The function we are interested in lifting as the body of a parallel loop
+      SetVector<GlobalValue*> GVs;
+      auto F = cast<Function>(Body);
+      GVs.insert(F);
 
       // The continuation launched might in turn call other functions.
       // Recursively record those functions for extraction as well.
-      SetVector<GlobalValue *> GVs;
-      GVs.insert(G);
+      std::vector<Function *> WorkQueue;
+      WorkQueue.push_back(F);
 
-      if (Function* F = dyn_cast<Function>(G)) {
-        std::vector<Function *> WorkQueue;
-        WorkQueue.push_back(F);
+      while (!WorkQueue.empty()) {
+        F = &*WorkQueue.back();
+        WorkQueue.pop_back();
 
-        while (!WorkQueue.empty()) {
-          Function* F = &*WorkQueue.back();
-          WorkQueue.pop_back();
-
-          for (auto &BB : *F) {
-            for (auto &I : BB) {
-              if (CallBase* CB = dyn_cast<CallBase>(&I)) {
-                if (Function* CF = CB->getCalledFunction()) {
-                  if (!GVs.contains(CF)) {
-                    GVs.insert(CF);
-                    WorkQueue.push_back(CF);
-                  }
+        for (auto &BB : *F) {
+          for (auto &I : BB) {
+            if (auto *CB = dyn_cast<CallBase>(&I)) {
+              if (auto *CF = CB->getCalledFunction()) {
+                if (!GVs.contains(CF)) {
+                  GVs.insert(CF);
+                  WorkQueue.push_back(CF);
                 }
               }
             }
@@ -1501,7 +1661,7 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
 
       // Generate PTX assembly for the (set of) functions called by the
       // `parallel_for` launcher, and embed the generated code into the module
-      ArrayRef<uint8_t> Obj = CreateKernel(Context, Body->getName(), GVs);
+      ArrayRef<uint8_t> Obj = CreateKernel(Context, M, Body->getName(), GVs);
       size_t buffer_size = Obj.size();
       IntegerType* i8_t = IntegerType::getInt8Ty(Context);
       ArrayType* image_t = ArrayType::get(i8_t, buffer_size);
@@ -1510,10 +1670,7 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
       std::transform(Obj.begin(), Obj.end(), KernelData.begin(), [&](uint8_t c) { return ConstantInt::get(i8_t, c); });
       free((void*) Obj.data()); // ArrayRef does not own the underlying buffer
 
-      GlobalVariable* Image = new GlobalVariable(M, image_t, true,
-          GlobalValue::InternalLinkage,
-          ConstantArray::get(image_t, ArrayRef(KernelData)),
-          Body->getName() + "$image");  // XXX this will need to get more complicated as we do more specialisation
+      GlobalVariable* Image = new GlobalVariable(M, image_t, true, GlobalValue::InternalLinkage, ConstantArray::get(image_t, ArrayRef(KernelData)));
       Image->setAlignment(Align(1));
       Image->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
 
@@ -1526,8 +1683,7 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
               , ConstantAggregateZero::get(kernel_t->getElementType(2))
               , ConstantAggregateZero::get(kernel_t->getElementType(3))
               , ConstantAggregateZero::get(kernel_t->getElementType(4))
-              }),
-          Body->getName() + "$kernel");
+              }));
       Kernel->setAlignment(Align(8));
       Kernel->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
 
@@ -1541,16 +1697,17 @@ PreservedAnalyses ParallelForPass::run(Module &M, ModuleAnalysisManager &MAM)
       CIpar->addParamAttr(2, Attribute::NonNull);
       ReplaceInstWithInst(CI, CIpar);
 
-      // Update the closure environment so that its contents are accessible from
-      // the device.
+      // Update the closure environment so that its contents are accessible from the device
       UpdateClosureEnvironment(Context, M, Body, Env, { Context0, Context1, Context2 }, { Allocator0, Allocator1, Allocator2 }, CIpar);
     }
   }
 
+  Context.setDiscardValueNames(DiscardValueNames);
   return PreservedAnalyses::none();
 }
 
 
+#if false
 /* ----------------------------------------------------------------------------
  * Registering passes as plugins
  *
@@ -1561,7 +1718,7 @@ llvm::PassPluginLibraryInfo getParallelForPluginInfo()
 {
   return
     { LLVM_PLUGIN_API_VERSION
-    , "lift-to-ptx<parallel_for>"
+    , "swift-to-ptx<parallel_for>"
     , LLVM_VERSION_STRING
     , [](PassBuilder &PB) {
         PB.registerOptimizerLastEPCallback(
@@ -1576,10 +1733,11 @@ llvm::PassPluginLibraryInfo getParallelForPluginInfo()
 
 // This is the core interface for pass plugins. It guarantees that 'opt' will
 // be able to recognize it when added to the pass pipeline on the
-// command line, i.e. via '-passes=lift-to-ptx<parallel_for>'
+// command line, i.e. via '-passes=swift-to-ptx<parallel_for>'
 //
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo()
 {
   return getParallelForPluginInfo();
 }
+#endif
 

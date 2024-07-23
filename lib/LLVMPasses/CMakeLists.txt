@@ -16,3 +16,5 @@ target_link_libraries(swiftLLVMPasses PRIVATE
   swiftDemangling)
 
 set_swift_llvm_is_available(swiftLLVMPasses)
+
+add_subdirectory(SwiftToPTX)

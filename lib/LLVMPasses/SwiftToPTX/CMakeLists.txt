@@ -1,12 +1,29 @@
-add_library(LiftToPTX MODULE
+add_swift_host_library(swiftLLVMPassesSwiftToPTX STATIC
   ParallelFor.cpp
+
+  LLVM_LINK_COMPONENTS
+  Analysis
+  AsmParser
+  BitReader
+  Core
+  InstCombine
+  MC
+  ${LLVM_NATIVE_ARCH}CodeGen
+  NVPTXCodeGen
+  Passes
+  ScalarOpts
+  Support
+  Target
+  TransformUtils
 )
 
-target_include_directories(LiftToPTX PRIVATE
+target_link_libraries(swiftLLVMPassesSwiftToPTX PRIVATE
+  swiftDemangling
+)
+
+target_include_directories(swiftLLVMPassesSwiftToPTX PRIVATE
   ${CMAKE_SOURCE_DIR}/include
 )
 
-# allow undefined symbols in shared libraries on MacOS (this is the default
-# behaviour on Linux)
-target_link_libraries(LiftToPTX "$<$<PLATFORM_ID:Darwin>:-undefined dynamic_lookup>")
+set_swift_llvm_is_available(swiftLLVMPassesSwiftToPTX)
 

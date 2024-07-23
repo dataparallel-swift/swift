@@ -41,6 +41,7 @@
 #include "swift/IRGen/TBDGen.h"
 #include "swift/LLVMPasses/Passes.h"
 #include "swift/LLVMPasses/PassesFwd.h"
+#include "swift/LLVMPasses/SwiftToPTX/ParallelFor.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/SILRemarkStreamer.h"
 #include "swift/SILOptimizer/PassManager/PassManager.h"
@@ -84,6 +85,7 @@
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/IPO/ThinLTOBitcodeWriter.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Instrumentation.h"
 #include "llvm/Transforms/Instrumentation/AddressSanitizer.h"
 #include "llvm/Transforms/Instrumentation/InstrProfiling.h"
@@ -92,6 +94,7 @@
 #include "llvm/Transforms/ObjCARC.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/DCE.h"
+#include "llvm/Transforms/Scalar/GVN.h"
 
 #include <thread>
 
@@ -408,6 +411,17 @@ void swift::performLLVMOptimizations(const IRGenOptions &Opts,
   if (Opts.shouldOptimize() && !DisableObjCARCContract &&
       !Opts.DisableLLVMOptzns)
     MPM.addPass(createModuleToFunctionPassAdaptor(ObjCARCContractPass()));
+
+  // Perform Swift-to-PTX function lifting under optimisation
+  // TODO: We should probably add a separate flag to enable/disable this
+  if (Opts.shouldOptimize() && !Opts.DisableLLVMOptzns) {
+    FunctionPassManager FPM;
+    MPM.addPass(ParallelForPass());
+    FPM.addPass(DCEPass());
+    FPM.addPass(GVNPass());
+    FPM.addPass(InstCombinePass());
+    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+  }
 
   if (Opts.Verify) {
     // Run verification before we run the pipeline.
