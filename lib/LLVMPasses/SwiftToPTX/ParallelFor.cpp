@@ -3,7 +3,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/LLVMPasses/SwiftToPTX/ParallelFor.h"
-#include "swift/Demangling/Demangle.h"
+#include "swift/Demangling/Demangler.h"
 
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
@@ -829,7 +829,7 @@ ArrayRef<uint8_t> CreateKernel
     }
   }
 
-  // CUDA-11.4 doesn't understand the PTX-7.5 syntax that LLVM-17 is
+  // XXX: CUDA-11.4 doesn't understand the PTX-7.5 syntax that LLVM-17 is
   // (incorrectly) generating for debug information
   StripDebugInfo(*M);
 
@@ -932,61 +932,134 @@ ArrayRef<uint8_t> CreateKernel
   return Obj;
 }
 
-// Swift will apply scalar replacement of aggregates in order to pass struct
-// (components) in registers for function calls.
-//
-// Somewhat ironically, we repackage those components again to make it a bit
-// more convenient to work with, and hope that the (C++) compiler again does the
-// same thing to make our function calls more efficient.
-struct SORA3 {
-  Value* _0;
-  Value* _1;
-  Value* _2;
-};
-typedef struct SORA3 CUDAContext;
-typedef struct SORA3 CachingHostAllocator;
-
-
-Value* GetArrayTypeDictionary(LLVMContext& Context, Module& M, Value* P)
+Value* GetTypeFromSpecialisation(LLVMContext& Context, Module& M, StringRef Name)
 {
-  if (CallInst* I = dyn_cast<CallInst>(P)) {
-    if (Function* F = I->getCalledFunction()) {
-      // static Swift.Array._allocateBufferUninitialized(minimumCapacity: Swift.Int) -> Swift._ContiguousArrayBuffer<A>
-      if (F->getName() == "$sSa28_allocateBufferUninitialized15minimumCapacitys016_ContiguousArrayB0VyxGSi_tFZ")
-        return I->getOperand(1);
+  // Check for this kind of node tree:
+  //
+  // kind=Global
+  //   kind=GenericSpecialization
+  //     kind=SpecializationPassID, index=5
+  //     kind=GenericSpecializationParam
+  //       kind=Type
+  //         kind=Structure
+  //           kind=Module, text="Swift"
+  //           kind=Identifier, text="Float"
+  //   ...
+  using namespace swift::Demangle;
 
-      // generic specialization <Swift.Float> of static Swift.Array._allocateUninitialized(Swift.Int) -> ([A], Swift.UnsafeMutablePointer<A>)
-      if (F->getName() == "$sSa22_allocateUninitializedySayxG_SpyxGtSiFZSf_Tgm5")
-        return M.getGlobalVariable("$sSfN");
+  Demangler demangler;
 
-      // generic specialization <Swift.Float> of Swift._ContiguousArrayBuffer._consumeAndCreateNew() -> Swift._ContiguousArrayBuffer<A>
-      if (F->getName() == "$ss22_ContiguousArrayBufferV20_consumeAndCreateNewAByxGyFSf_Tg5")
-        return M.getGlobalVariable("$sSfN");
+  NodePointer root = demangler.demangleSymbol(Name);
+  if (!root || root->getKind() != Node::Kind::Global)
+    return nullptr;
 
-      // merged generic specialization <Swift.Float> of static Swift.Array._allocateUninitialized(Swift.Int) -> ([A], Swift.UnsafeMutablePointer<A>)
-      if (F->getName() == "$sSa22_allocateUninitializedySayxG_SpyxGtSiFZSf_Tgm5Tm")
-        return M.getGlobalVariable("$sSfN");
-    }
-  }
+  // XXX: We could be better off using TypeDecoder?
+  for (auto &child : *root) {
+    if (child->getKind() == Node::Kind::GenericSpecialization) {
+      for (auto &param : *child) {
+        if (param->getKind() == Node::Kind::GenericSpecializationParam) {
+          NodePointer type = param->getFirstChild();
+          assert(type->getKind() == Node::Kind::Type);
 
-  else if (GetElementPtrInst* I = dyn_cast<GetElementPtrInst>(P)) {
-    return GetArrayTypeDictionary(Context, M, I->getPointerOperand());
-  }
+          // swift loves to wrap all types in structs
+          assert(type->getNumChildren() == 1 && type->getFirstChild()->getKind() == Node::Kind::Structure);
+          type = type->getFirstChild();
 
-  else if (ExtractValueInst* I = dyn_cast<ExtractValueInst>(P)) {
-    return GetArrayTypeDictionary(Context, M, I->getAggregateOperand());
-  }
+          assert(type->getNumChildren() == 2);
+          assert(type->getChild(0)->getKind() == Node::Kind::Module && type->getChild(0)->getText() == "Swift");
+          assert(type->getChild(1)->getKind() == Node::Kind::Identifier);
 
-  else if (PHINode* I = dyn_cast<PHINode>(P)) {
-    const unsigned int N = I->getNumIncomingValues();
-    for (unsigned int i = 0; i < N; ++i) {
-      if (Value* R = GetArrayTypeDictionary(Context, M, I->getIncomingValue(i))) {
-        return R;
+          StringRef Type = type->getChild(1)->getText();
+
+          if (Type == "Float")
+            return M.getOrInsertGlobal("$sSfN", StructType::getTypeByName(Context, "swift.type"));
+
+          if (Type == "Double")
+            return M.getOrInsertGlobal("$sSdN", StructType::getTypeByName(Context, "swift.type"));
+
+          if (Type == "Int")
+            return M.getOrInsertGlobal("$sSiN", StructType::getTypeByName(Context, "swift.type"));
+
+          if (Type == "UInt")
+            return M.getOrInsertGlobal("$sSuN", StructType::getTypeByName(Context, "swift.type"));
+        }
       }
     }
   }
 
   return nullptr;
+}
+
+std::pair<Value*, Value*> GetArrayCountAndTypeDictionary(LLVMContext& Context, Module& M, Value* P)
+{
+  if (CallInst* I = dyn_cast<CallInst>(P)) {
+    if (Function* F = I->getCalledFunction()) {
+      StringRef Name = F->getName();
+
+      // static Swift.Array._allocateBufferUninitialized(minimumCapacity: Swift.Int) -> Swift._ContiguousArrayBuffer<A>
+      if (Name == "$sSa28_allocateBufferUninitialized15minimumCapacitys016_ContiguousArrayB0VyxGSi_tFZ")
+        return {I->getOperand(0), I->getOperand(1)};
+
+      // static Swift.Array._allocateUninitialized(Swift.Int) -> ([A], Swift.UnsafeMutablePointer<A>)
+      if (Name.starts_with("$sSa22_allocateUninitializedySayxG_SpyxGtSiFZ"))
+        return {I->getOperand(0), GetTypeFromSpecialisation(Context, M, Name)};
+
+      // Swift.Array.init(repeating: A, count: Swift.Int) -> [A]
+      if (Name.starts_with("$sSa9repeating5countSayxGx_SitcfC"))
+        return {I->getOperand(1), GetTypeFromSpecialisation(Context, M, Name)};
+
+      // Swift._ContiguousArrayBuffer._consumeAndCreateNew() -> Swift._ContiguousArrayBuffer<A>
+      if (Name.starts_with("$ss22_ContiguousArrayBufferV20_consumeAndCreateNewAByxGyF")) {
+        // Try to determine from the current context the size and type
+        auto Result = GetArrayCountAndTypeDictionary(Context, M, I->getOperand(0));
+
+        if (!get<1>(Result))
+          get<1>(Result) = GetTypeFromSpecialisation(Context, M, Name);
+
+        return Result;
+      }
+
+      report_fatal_error("unhandled array allocator: " + Name);
+    }
+  }
+
+  else if (GetElementPtrInst* I = dyn_cast<GetElementPtrInst>(P)) {
+    return GetArrayCountAndTypeDictionary(Context, M, I->getPointerOperand());
+  }
+
+  else if (ExtractValueInst* I = dyn_cast<ExtractValueInst>(P)) {
+    return GetArrayCountAndTypeDictionary(Context, M, I->getAggregateOperand());
+  }
+
+  else if (PHINode* I = dyn_cast<PHINode>(P)) {
+    const unsigned int N = I->getNumIncomingValues();
+    Value* Type = nullptr;
+
+    for (unsigned int i = 0; i < N; ++i) {
+      auto Result = GetArrayCountAndTypeDictionary(Context, M, I->getIncomingValue(i));
+
+      if (get<0>(Result)) // implicitly also the type dictionary
+        return Result;
+
+      if (!Type)
+        Type = get<1>(Result);
+    }
+
+    if (Type) {
+      IntegerType* i32_t = IntegerType::getInt32Ty(Context);
+      IntegerType* i64_t = IntegerType::getInt64Ty(Context);
+      StructType* ContiguousArrayStorageBase = StructType::getTypeByName(Context, "Ts28__ContiguousArrayStorageBaseC");
+      GetElementPtrInst* GEP = GetElementPtrInst::CreateInBounds(ContiguousArrayStorageBase, I, { ConstantInt::get(i64_t, 0), ConstantInt::get(i32_t, 1) });
+      LoadInst* Count = new LoadInst(i64_t, GEP, "", false, Align(8));
+
+      Count->insertAfter(I);
+      GEP->insertAfter(I);
+
+      return {Count, Type};
+    }
+  }
+
+  return {nullptr, nullptr};
 }
 
 Value* GetArrayCount(LLVMContext& Context, Value* P, Instruction* InsertBefore)
@@ -1043,6 +1116,7 @@ Value* GetArrayCount(LLVMContext& Context, Value* P, Instruction* InsertBefore)
 
   GetElementPtrInst* GEP = GetElementPtrInst::CreateInBounds
       ( ContiguousArrayStorageBase
+      /* ( StructType::getTypeByName(Context, "TSrySiG") */
       , BaseAddress
       , { ConstantInt::get(i64_t, 0), ConstantInt::get(i32_t, 1) }
       , ""
@@ -1088,21 +1162,16 @@ Type* GetArrayElementType(LLVMContext& Context, Module& M, Value* P)
       return I->getType();
     }
 
-    if (CallBase* I = dyn_cast<CallBase>(U)) {
-      // XXX TODO: This is an indirect call to a captured closure. Maybe we can
-      // determine the function from the call site and specialise (inline) it
-      // into the compiled kernel. ---TLM 2024-05-07
-      if (P == I->getCalledOperand()) {
-        report_fatal_error("(indirect) function calls captured by closure environment are not (yet) supported", false);
+    if (CallInst* I = dyn_cast<CallInst>(U)) {
+      for (unsigned i = 0; i < I->arg_size(); ++i) {
+        if (I->getArgOperand(i) == P) {
+          return GetArrayElementType(Context, M, I->getCalledFunction()->getArg(i));
+        }
       }
-
-      assert(false && "TODO: (indirect) function calls");
     }
-
-    errs() << "GetArrayElementType unhandled: " << *U << "\n";
   }
 
-  report_fatal_error("could not determine array element type", false);
+  assert(false && "couldn't determine array element type");
 }
 
 // Get a device-accessible pointer to the given address. This is usually
@@ -1122,12 +1191,14 @@ Instruction* GetDevicePointer (
     Instruction* InsertBefore
 )
 {
-  Value* Type = GetArrayTypeDictionary(Context, M, Addr);
-  Value* Count = GetArrayCount(Context, Addr, InsertBefore);
-  Function* F = M.getFunction("$s10SwiftToPTX16getDevicePointerys6UInt64VSpyxG_SitlF");
+  auto R = GetArrayCountAndTypeDictionary(Context, M, Addr);
+  Value* Count = get<0>(R);
+  Value* Type  = get<1>(R);
 
   assert(Type && "could not determine type of input array");
   assert(Count && "could not determine size of input array");
+
+  Function* F = M.getFunction("$s10SwiftToPTX16getDevicePointerys6UInt64VSpyxG_SitlF");
   return CallInst::Create(F->getFunctionType(), F, { Addr, Count, Type });
 }
 
@@ -1154,11 +1225,11 @@ Instruction* GetDevicePointer (
       if (!GEP2->hasAllConstantIndices())
         continue;
 
-      if (GEP2->getNumIndices() != GEP->getNumIndices())
+      if (GEP2->getNumOperands() != GEP->getNumOperands())
         continue;
 
       bool Equal = true;
-      for (unsigned int i = 1; i <= GEP->getNumIndices(); ++i) {
+      for (unsigned int i = 1; i < GEP->getNumOperands(); ++i) {
         if (GEP->getOperand(i) != GEP2->getOperand(i)) {
           Equal = false;
           break;
@@ -1175,7 +1246,18 @@ Instruction* GetDevicePointer (
       LoadInst *P = cast<LoadInst>(GEP2->getUniqueUndroppableUser());
 
       Type* ElementType = GetArrayElementType(Context, M, P);
+      if (!ElementType)
+        return nullptr;
+
       Value* Count = GetArrayCount(Context, Arg, InsertBefore);
+      if (!Count)
+        return nullptr;
+
+      // XXX: I'm not sure this is correct, I think we have a header part that
+      // contains both the size and a pointer to the actual payload. Those two
+      // things may not actually be adjacent in memory, and we need to make both
+      // of those device accessible.
+
       TypeSize Stride = M.getDataLayout().getTypeAllocSize(ElementType);
       TypeSize Header = M.getDataLayout().getTypeAllocSize(ContiguousArrayStorageBase);
       Instruction* Bytes = BinaryOperator::Create(Instruction::Mul, Count, ConstantInt::get(i64_t, Stride), "", InsertBefore);
@@ -1188,6 +1270,17 @@ Instruction* GetDevicePointer (
 
   return nullptr;
 }
+
+
+// Swift will apply scalar replacement of aggregates in order to pass struct
+// (components) in registers for function calls.
+//
+// Somewhat ironically, we repackage those components again to make it a bit
+// more convenient to work with, and hope that the (C++) compiler again does the
+// same thing to make our function calls more efficient. We should really check
+// whether it does...
+typedef std::tuple<Value*, Value*, Value*> CUDAContext;
+typedef std::tuple<Value*, Value*, Value*> CachingHostAllocator;
 
 // Update the environment so that its contents are accessible from the device.
 // This is the recursive overload of UpdateClosureEnvironment() that does all
@@ -1266,7 +1359,7 @@ void UpdateClosureEnvironment (
     IntegerType *i64_t = IntegerType::getInt64Ty(Context);
     ConstantInt *size = ConstantInt::get(i64_t, TypeSize->getFixedValue());
     Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF");
-    CallInst *NewI = CallInst::Create(F->getFunctionType(), F, {size, Allocator._0, Allocator._1, Allocator._2});
+    CallInst *NewI = CallInst::Create(F->getFunctionType(), F, {size, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
     NewI->setCallingConv(CallingConv::Swift);
     ReplaceInstWithInst(I, NewI);
     ToFree.insert(NewI);
@@ -1282,7 +1375,7 @@ void UpdateClosureEnvironment (
           assert(cast<CallInst>(Restore)->getCalledFunction()->getName() == "llvm.stackrestore");
 
           Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
-          CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI, Event, Allocator._0, Allocator._1, Allocator._2});
+          CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
           Free->setCallingConv(CallingConv::Swift);
           Free->insertAfter(Restore);
           ToFree.erase(NewI);
@@ -1324,7 +1417,9 @@ void UpdateClosureEnvironment (
   //
   //       TODO: We should also unregister this memory once it is no longer
   //       needed on the device, or at least when the array is deallocated, so
-  //       that we do not leak *pinned* memory.
+  //       that we do not leak *pinned* memory. Note that this array might be
+  //       used from multiple places, so effectively we need to do hook into the
+  //       reference counting system.
   //
   //    b. This is a function pointer (i.e. closure). There are further
   //       possibilities:
@@ -1349,10 +1444,11 @@ void UpdateClosureEnvironment (
       UpdateClosureEnvironment(Context, M, K, A, CUDA, Allocator, Event, ToErase, ToFree);
     } else {
       if (PointerType *T = dyn_cast<PointerType>(A->getType())) {
-        Instruction* Anew = GetDevicePointer(Context, M, K, A, P, I);
-        StoreInst* Inew = new StoreInst(Anew, P, false, Align(16));
-        Anew->insertBefore(I);
-        ReplaceInstWithInst(I, Inew);
+        if (Instruction* Anew = GetDevicePointer(Context, M, K, A, P, I)) {
+          StoreInst* Inew = new StoreInst(Anew, P, false, Align(16));
+          Anew->insertBefore(I);
+          ReplaceInstWithInst(I, Inew);
+        }
       }
     }
   }
@@ -1362,24 +1458,25 @@ void UpdateClosureEnvironment (
   else if (PtrToIntInst *I = dyn_cast<PtrToIntInst>(P)) {
     // Get a pointer to the data that is accessible from the device
     Value* Addr = I->getPointerOperand();
-    Instruction* Inew = GetDevicePointer(Context, M, Addr, I);
-    ReplaceInstWithInst(I, Inew);
+    if (Instruction* Inew = GetDevicePointer(Context, M, Addr, I)) {
+      ReplaceInstWithInst(I, Inew);
 
-    // In the function epilogue we check that the pointer address that was
-    // stored in the closure environment is the same as after the closure was
-    // executed. Presumably this signals that some error occurred (buffer
-    // overrun, stack clobbering, ...?) in which case the function will SIGTRAP.
-    for (auto U = Addr->user_begin(), UE = Addr->user_end(); U != UE; /* See: [1] */) {
-      Value *V = *U++;
+      // In the function epilogue we check that the pointer address that was
+      // stored in the closure environment is the same as after the closure was
+      // executed. Presumably this signals that some error occurred (buffer
+      // overrun, stack clobbering, ...?) in which case the function will SIGTRAP.
+      for (auto U = Addr->user_begin(), UE = Addr->user_end(); U != UE; /* See: [1] */) {
+        Value *V = *U++;
 
-      if (V == Inew)
-        continue;
+        if (V == Inew)
+          continue;
 
-      if (ICmpInst *ICMP = dyn_cast<ICmpInst>(V)) {
-        IntToPtrInst *X = cast<IntToPtrInst>(ICMP->getOperand(1));
-        ICmpInst *ICMPnew = new ICmpInst(CmpInst::ICMP_EQ, Inew, X->getOperand(0));
-        ReplaceInstWithInst(ICMP, ICMPnew);
-        X->eraseFromParent();
+        if (ICmpInst *ICMP = dyn_cast<ICmpInst>(V)) {
+          IntToPtrInst *X = cast<IntToPtrInst>(ICMP->getOperand(1));
+          ICmpInst *ICMPnew = new ICmpInst(CmpInst::ICMP_EQ, Inew, X->getOperand(0));
+          ReplaceInstWithInst(ICMP, ICMPnew);
+          X->eraseFromParent();
+        }
       }
     }
   }
@@ -1398,7 +1495,7 @@ void UpdateClosureEnvironment (
         // Assume that we will encounter the corresponding .start()
         Value *Alloca = I->getArgOperand(1);
         Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
-        CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, Allocator._0, Allocator._1, Allocator._2});
+        CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
         Free->setCallingConv(CallingConv::Swift);
         Free->insertAfter(I);
         ToFree.erase(Alloca);
@@ -1467,7 +1564,7 @@ void UpdateClosureEnvironment (
     Function* F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
     Instruction *Ret = Returns.front();
     for (auto *Alloca : ToFree) {
-      CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, Allocator._0, Allocator._1, Allocator._2});
+      CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
       Free->setCallingConv(CallingConv::Swift);
       Free->insertBefore(Ret);
     }
@@ -1495,7 +1592,7 @@ void UpdateClosureEnvironment (
   // the allocator
   //
   DominatorTree DT(*Parent);
-  if (isa<Instruction>(CUDA._0) || isa<Instruction>(Allocator._0)) {
+  if (isa<Instruction>(get<0>(CUDA)) || isa<Instruction>(get<0>(Allocator))) {
     Instruction* Lowest = nullptr;
     Instruction* Highest = nullptr;
     Instruction* Release0 = nullptr;
@@ -1503,7 +1600,7 @@ void UpdateClosureEnvironment (
     Instruction* Release2 = nullptr;
 
     // Locate the pre- and post-dominating instructions
-    for (auto *U : Allocator._0->users()) {
+    for (auto *U : get<0>(Allocator)->users()) {
       if (Instruction* I = dyn_cast<Instruction>(U)) {
         if (CallInst* CI = dyn_cast<CallInst>(I)) {
           if (CI->getCalledFunction()->getName() == "swift_release") {
@@ -1535,26 +1632,26 @@ void UpdateClosureEnvironment (
     }
 
     // Move context and allocator (de)initialisers
-    if (Instruction *I = dyn_cast<Instruction>(CUDA._0)) {
+    if (Instruction *I = dyn_cast<Instruction>(get<0>(CUDA))) {
       if (ExtractValueInst *EV = dyn_cast<ExtractValueInst>(I)) {
         if (Instruction *I0 = dyn_cast<Instruction>(EV->getAggregateOperand())) {
           I0->moveBefore(Highest);
         }
       }
       I->moveBefore(Highest);
-      cast<Instruction>(CUDA._1)->moveBefore(Highest);
-      cast<Instruction>(CUDA._2)->moveBefore(Highest);
+      cast<Instruction>(get<1>(CUDA))->moveBefore(Highest);
+      cast<Instruction>(get<2>(CUDA))->moveBefore(Highest);
     }
 
-    if (Instruction *I = dyn_cast<Instruction>(Allocator._0)) {
+    if (Instruction *I = dyn_cast<Instruction>(get<0>(Allocator))) {
       if (ExtractValueInst *EV = dyn_cast<ExtractValueInst>(I)) {
         if (Instruction *I0 = dyn_cast<Instruction>(EV->getAggregateOperand())) {
           I0->moveBefore(Highest);
         }
       }
       I->moveBefore(Highest);
-      cast<Instruction>(Allocator._1)->moveBefore(Highest);
-      cast<Instruction>(Allocator._2)->moveBefore(Highest);
+      cast<Instruction>(get<1>(Allocator))->moveBefore(Highest);
+      cast<Instruction>(get<2>(Allocator))->moveBefore(Highest);
     }
 
     if (Release0) {
