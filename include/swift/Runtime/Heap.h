@@ -30,20 +30,20 @@ namespace swift {
 // Never returns nil. The returned memory is uninitialized. 
 //
 // An "alignment mask" is just the alignment (a power of 2) minus 1.
-SWIFT_EXTERN_C SWIFT_RETURNS_NONNULL SWIFT_NODISCARD SWIFT_RUNTIME_EXPORT_ATTRIBUTE
+SWIFT_EXTERN_C SWIFT_ATTRIBUTE_FOR_IMPORTS SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
 void *swift_slowAlloc(size_t bytes, size_t alignMask);
 
 using MallocTypeId = unsigned long long;
 
-SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
+SWIFT_EXTERN_C SWIFT_ATTRIBUTE_FOR_IMPORTS SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
 void *swift_slowAllocTyped(size_t bytes, size_t alignMask, MallocTypeId typeId);
 
 // If the caller cannot promise to zero the object during destruction,
 // then call these corresponding APIs:
-SWIFT_RUNTIME_EXPORT
+SWIFT_EXTERN_C SWIFT_ATTRIBUTE_FOR_IMPORTS
 void swift_slowDealloc(void *ptr, size_t bytes, size_t alignMask);
 
-SWIFT_RUNTIME_EXPORT
+SWIFT_EXTERN_C SWIFT_ATTRIBUTE_FOR_IMPORTS
 void swift_clearSensitive(void *ptr, size_t bytes);
 
 /// Allocate and construct an instance of type \c T.

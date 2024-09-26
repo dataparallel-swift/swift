@@ -54,6 +54,19 @@ static constexpr size_t MALLOC_ALIGN_MASK = 7;
 static constexpr size_t MALLOC_ALIGN_MASK = alignof(std::max_align_t) - 1;
 #endif
 
+
+/* Define ALIASNAME as a strong alias for NAME.  */
+#define strong_alias(name, aliasname) \
+  extern __typeof (name) aliasname __attribute__ ((alias (#name))) \
+    __attribute_copy__ (name);
+
+// Define ALIASNAME as a weak alias for NAME.
+// If weak aliases are not available, this defines a strong alias.
+#define weak_alias(name, aliasname) \
+  extern __typeof (name) aliasname __attribute__ ((weak, alias (#name))) \
+    __attribute_copy__ (name);
+
+
 // This assert ensures that manually allocated memory always uses the
 // AlignedAlloc path. The stdlib will use "default" alignment for any user
 // requested alignment less than or equal to _swift_MinAllocationAlignment. The
@@ -73,6 +86,24 @@ static size_t computeAlignment(size_t alignMask) {
                                      : alignMask + 1;
 }
 
+// Forward declaration so that we can provide asm("") naming shenanigans to
+// force the compiler to not generate a mangled name
+SWIFT_LIBRARY_VISIBILITY
+void* __swift_slowAlloc(size_t size, size_t alignMask)
+  asm("__swift_slowAlloc");
+
+SWIFT_LIBRARY_VISIBILITY
+void* __swift_slowAllocTyped(size_t size, size_t alignMask, MallocTypeId typeId)
+  asm("__swift_slowAllocTyped");
+
+SWIFT_LIBRARY_VISIBILITY
+void __swift_slowDealloc(void *ptr, size_t bytes, size_t alignMask)
+  asm("__swift_slowDealloc");
+
+SWIFT_LIBRARY_VISIBILITY
+void __swift_clearSensitive(void *ptr, size_t bytes)
+  asm("__swift_clearSensitive");
+
 // For alignMask > (_minAllocationAlignment-1)
 // i.e. alignment == 0 || alignment > _minAllocationAlignment:
 //   The runtime must use AlignedAlloc, and the standard library must
@@ -82,7 +113,7 @@ static size_t computeAlignment(size_t alignMask) {
 // i.e. 0 < alignment <= _minAllocationAlignment:
 //   The runtime may use either malloc or AlignedAlloc, and the standard library
 //   must deallocate using an identical alignment.
-void *swift::swift_slowAlloc(size_t size, size_t alignMask) {
+void* __swift_slowAlloc(size_t size, size_t alignMask) {
   void *p;
   // This check also forces "default" alignment to use AlignedAlloc.
   if (alignMask <= MALLOC_ALIGN_MASK) {
@@ -94,9 +125,10 @@ void *swift::swift_slowAlloc(size_t size, size_t alignMask) {
   if (!p) swift::crash("Could not allocate memory.");
   return p;
 }
+weak_alias(__swift_slowAlloc, swift::swift_slowAlloc)
 
-void *swift::swift_slowAllocTyped(size_t size, size_t alignMask,
-                                  MallocTypeId typeId) {
+
+void* __swift_slowAllocTyped(size_t size, size_t alignMask, MallocTypeId typeId) {
 #if SWIFT_STDLIB_HAS_MALLOC_TYPE
   if (__builtin_available(macOS 9998, iOS 9998, tvOS 9998, watchOS 9998, *)) {
     void *p;
@@ -117,8 +149,10 @@ void *swift::swift_slowAllocTyped(size_t size, size_t alignMask,
     return p;
   }
 #endif
-  return swift_slowAlloc(size, alignMask);
+  return __swift_slowAlloc(size, alignMask);
 }
+weak_alias(__swift_slowAllocTyped, swift::swift_slowAllocTyped)
+
 
 // Unknown alignment is specified by passing alignMask == ~(size_t(0)), forcing
 // the AlignedFree deallocation path for unknown alignment. The memory
@@ -136,21 +170,20 @@ void *swift::swift_slowAllocTyped(size_t size, size_t alignMask,
 // i.e. 0 < alignment <= _minAllocationAlignment:
 //   The runtime may use either `free` or AlignedFree as long as it is
 //   consistent with allocation with the same alignment.
-static void swift_slowDeallocImpl(void *ptr, size_t alignMask) {
+void __swift_slowDealloc(void *ptr, size_t bytes, size_t alignMask) {
   if (alignMask <= MALLOC_ALIGN_MASK) {
     free(ptr);
   } else {
     AlignedFree(ptr);
   }
 }
+weak_alias(__swift_slowDealloc, swift::swift_slowDealloc)
 
-void swift::swift_slowDealloc(void *ptr, size_t bytes, size_t alignMask) {
-  swift_slowDeallocImpl(ptr, alignMask);
-}
-
-void swift::swift_clearSensitive(void *ptr, size_t bytes) {
+void __swift_clearSensitive(void *ptr, size_t bytes) {
   // TODO: use memset_s if available
   // Though, it shouldn't make too much difference because the optimizer cannot remove
   // the following memset without inlining this library function.
   memset(ptr, 0, bytes);
 }
+weak_alias(__swift_clearSensitive, swift::swift_clearSensitive)
+
