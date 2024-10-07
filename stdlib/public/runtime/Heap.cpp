@@ -97,6 +97,10 @@ void* __swift_slowAllocTyped(size_t size, size_t alignMask, MallocTypeId typeId)
   asm("__swift_slowAllocTyped");
 
 SWIFT_LIBRARY_VISIBILITY
+void* __swift_slowRealloc(void* ptr, size_t newSize, size_t alignMask)
+  asm("__swift_slowRealloc");
+
+SWIFT_LIBRARY_VISIBILITY
 void __swift_slowDealloc(void *ptr, size_t bytes, size_t alignMask)
   asm("__swift_slowDealloc");
 
@@ -150,6 +154,24 @@ void* __swift_slowAllocTyped(size_t size, size_t alignMask, MallocTypeId typeId)
 weak_alias(__swift_slowAllocTyped, swift::swift_slowAllocTyped)
 
 
+void *__swift_slowRealloc(void* ptr, size_t newSize, size_t alignMask) {
+  void* p;
+  if (alignMask <= MALLOC_ALIGN_MASK) {
+    p = realloc(ptr, newSize);
+  } else {
+    size_t alignment = computeAlignment(alignMask);
+    size_t oldSize = swift_usableSize(ptr);
+    p = AlignedAlloc(newSize, alignment);
+    memcpy(p, ptr, oldSize < newSize ? oldSize : newSize);
+    AlignedFree(ptr);
+  }
+
+  if (!p) swift::crash("Could not reallocate memory.");
+  return p;
+}
+weak_alias(__swift_slowRealloc, swift::swift_slowRealloc)
+
+
 // Unknown alignment is specified by passing alignMask == ~(size_t(0)), forcing
 // the AlignedFree deallocation path for unknown alignment. The memory
 // deallocated with unknown alignment must have been allocated with either
@@ -174,6 +196,21 @@ void __swift_slowDealloc(void *ptr, size_t bytes, size_t alignMask) {
   }
 }
 weak_alias(__swift_slowDealloc, swift::swift_slowDealloc)
+
+// Non-standard extension
+__attribute__((weak))
+__swift_size_t swift_usableSize(const void *ptr) {
+#if defined(__APPLE__)
+  return malloc_size(ptr);
+#elif defined(__linux__) || defined(__CYGWIN__) || defined(__ANDROID__) \
+   || defined(__HAIKU__) || defined(__FreeBSD__) || defined(__wasi__)
+  return malloc_usable_size(const_cast<void *>(ptr));
+#elif defined(_WIN32)
+  return _msize(const_cast<void *>(ptr));
+#else
+  return 0;
+#endif
+}
 
 void swift::swift_clearSensitive(void *ptr, size_t bytes) {
   // TODO: use memset_s if available

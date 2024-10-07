@@ -23,6 +23,7 @@
 #include <utility>
 
 #include "swift/Runtime/Config.h"
+#include "swift/shims/Heap.h"
 #include "swift/shims/Visibility.h"
 
 namespace swift {
@@ -37,6 +38,9 @@ using MallocTypeId = unsigned long long;
 
 SWIFT_EXTERN_C SWIFT_ATTRIBUTE_FOR_IMPORTS SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
 void *swift_slowAllocTyped(size_t bytes, size_t alignMask, MallocTypeId typeId);
+
+SWIFT_EXTERN_C SWIFT_ATTRIBUTE_FOR_IMPORTS SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
+void *swift_slowRealloc(void* ptr, size_t bytes, size_t alignMask);
 
 // If the caller cannot promise to zero the object during destruction,
 // then call these corresponding APIs:

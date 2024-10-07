@@ -109,7 +109,7 @@ extension ManagedBuffer where Element: ~Copyable {
   @available(OpenBSD, unavailable, message: "malloc_size is unavailable.")
   public final var capacity: Int {
     let storageAddr = UnsafeMutableRawPointer(Builtin.bridgeToRawPointer(self))
-    let endAddr = storageAddr + _swift_stdlib_malloc_size(storageAddr)
+    let endAddr = storageAddr + swift_usableSize(storageAddr)
     let realCapacity = endAddr.assumingMemoryBound(to: Element.self) -
       firstElementAddress
     return realCapacity
@@ -560,7 +560,7 @@ extension ManagedBufferPointer where Element: ~Copyable {
   @inlinable
   @available(OpenBSD, unavailable, message: "malloc_size is unavailable.")
   internal var _capacityInBytes: Int {
-    return _swift_stdlib_malloc_size(_address)
+    return swift_usableSize(_address)
   }
 
   /// The address of this instance in a convenient pointer-to-bytes form

@@ -39,5 +39,7 @@ internal let _fastEnumerationStorageMutationsPtr =
 
 @usableFromInline @_alwaysEmitIntoClient
 internal func _mallocSize(ofAllocation ptr: UnsafeRawPointer) -> Int? {
-  return _swift_stdlib_has_malloc_size() ? _swift_stdlib_malloc_size(ptr) : nil
+  let size = swift_usableSize(ptr)
+  return (size != 0) ? size : nil
 }
+
