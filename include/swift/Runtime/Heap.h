@@ -23,6 +23,7 @@
 #include <utility>
 
 #include "swift/Runtime/Config.h"
+#include "swift/shims/Heap.h"
 #include "swift/shims/Visibility.h"
 
 namespace swift {
@@ -37,6 +38,9 @@ using MallocTypeId = unsigned long long;
 
 SWIFT_EXTERN_C SWIFT_ATTRIBUTE_FOR_IMPORTS SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
 void *swift_slowAllocTyped(size_t bytes, size_t alignMask, MallocTypeId typeId);
+
+SWIFT_EXTERN_C SWIFT_ATTRIBUTE_FOR_IMPORTS SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
+void *swift_slowRealloc(void* ptr, size_t bytes, size_t alignMask);
 
 // If SWIFT_STDLIB_HAS_MALLOC_TYPE is defined, allocate typed memory.
 // Otherwise, allocate plain memory.

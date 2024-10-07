@@ -4,6 +4,7 @@ set(sources
   EmbeddedShims.h
   FoundationShims.h
   GlobalObjects.h
+  Heap.h
   HeapObject.h
   KeyPath.h
   LibcOverlayShims.h
