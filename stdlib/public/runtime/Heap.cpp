@@ -100,10 +100,6 @@ SWIFT_LIBRARY_VISIBILITY
 void __swift_slowDealloc(void *ptr, size_t bytes, size_t alignMask)
   asm("__swift_slowDealloc");
 
-SWIFT_LIBRARY_VISIBILITY
-void __swift_clearSensitive(void *ptr, size_t bytes)
-  asm("__swift_clearSensitive");
-
 // For alignMask > (_minAllocationAlignment-1)
 // i.e. alignment == 0 || alignment > _minAllocationAlignment:
 //   The runtime must use AlignedAlloc, and the standard library must
@@ -179,11 +175,9 @@ void __swift_slowDealloc(void *ptr, size_t bytes, size_t alignMask) {
 }
 weak_alias(__swift_slowDealloc, swift::swift_slowDealloc)
 
-void __swift_clearSensitive(void *ptr, size_t bytes) {
+void swift::swift_clearSensitive(void *ptr, size_t bytes) {
   // TODO: use memset_s if available
   // Though, it shouldn't make too much difference because the optimizer cannot remove
   // the following memset without inlining this library function.
   memset(ptr, 0, bytes);
 }
-weak_alias(__swift_clearSensitive, swift::swift_clearSensitive)
-

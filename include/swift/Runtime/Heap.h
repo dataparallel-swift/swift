@@ -43,7 +43,7 @@ void *swift_slowAllocTyped(size_t bytes, size_t alignMask, MallocTypeId typeId);
 SWIFT_EXTERN_C SWIFT_ATTRIBUTE_FOR_IMPORTS
 void swift_slowDealloc(void *ptr, size_t bytes, size_t alignMask);
 
-SWIFT_EXTERN_C SWIFT_ATTRIBUTE_FOR_IMPORTS
+SWIFT_RUNTIME_EXPORT
 void swift_clearSensitive(void *ptr, size_t bytes);
 
 /// Allocate and construct an instance of type \c T.
