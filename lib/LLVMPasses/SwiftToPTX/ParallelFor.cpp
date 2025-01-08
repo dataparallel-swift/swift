@@ -60,8 +60,12 @@ static cl::opt<StringRef> TargetGPU (
   cl::desc("Target a specific GPU architecture in swift-to-ptx pass"));
 
 static cl::opt<StringRef> TargetFeatures (
-  "swift-to-ptx-target-attr", cl::Hidden, cl::init(""),  // default: +ptx75 (llvm-17 produces assembly using features from this version no matter what)
+  "swift-to-ptx-target-attr", cl::Hidden, cl::init("+ptx81"), // default: +ptx81 (highest version supported by LLVM-17 and CUDA-12.2|L4T R36.3)
   cl::desc("Target specific attributes in swift-to-ptx pass"));
+
+static cl::opt<bool> StripDeviceDebugInfo (
+  "swift-to-ptx-strip-debug-info", cl::Hidden, cl::init(false),
+  cl::desc("Strip debug information from device code"));
 
 static const MemoryBufferRef parallel_for_kernel = MemoryBufferRef(R"KERNEL(
 ; ModuleID = '<parallel_for_kernel>'
@@ -810,9 +814,12 @@ ArrayRef<uint8_t> CreateKernel
     }
   }
 
-  // XXX: CUDA-11.4 doesn't understand the PTX-7.5 syntax that LLVM-17 is
-  // (incorrectly) generating for debug information
-  StripDebugInfo(*M);
+  // Strip debug information from device code. This may be necessary on some
+  // combinations of Swift/CUDA due to bugs in LLVM. Debug information will only
+  // be present if already enabled as part of the swift compilation pipeline
+  // (default), it will not be generated as part of this plugin.
+  if (StripDeviceDebugInfo)
+    StripDebugInfo(*M);
 
   // Update the kernel function to call the main (entry) function from the set
   // that we extracted in the previous step.
