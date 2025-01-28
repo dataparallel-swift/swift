@@ -917,24 +917,7 @@ ArrayRef<uint8_t> CreateKernel
     errs() << obj_path << "\n";
   }
 
-  // TODO FIXME: For unknown reasons I am currently having a problem using the
-  // embedded object code, getting a 'CUDA_ERROR_INVALID_IMAGE (200): device
-  // kernel image is invalid' when trying to load the module. Switching to the
-  // PTX compiler API may or may not fix this. For now, just return the PTX
-  // assembly.
-  //   --- TLM 2024-10-09
-  /* return Obj; */
-
-  size_t   sz  = Asm.size() + 1;
-  uint8_t* buf = (uint8_t*) malloc(sz);
-  if (!buf) {
-    report_fatal_error("failed to allocate %ld bytes", sz);
-  }
-
-  memcpy(buf, Asm.data(), Asm.size());
-  buf[Asm.size()] = '\0';
-
-  return ArrayRef(buf, sz);
+  return Obj;
 }
 
 
