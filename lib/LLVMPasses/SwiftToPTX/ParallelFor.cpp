@@ -56,14 +56,14 @@ static cl::opt<StringRef> PTXASPath (
   cl::desc("Path to the ptxas executable"));
 
 static cl::opt<StringRef> TargetGPU (
-  "swift-to-ptx-target-gpu", cl::Hidden, cl::init("sm_87"),   // default: Orin
+  "swift-to-ptx-target-gpu", cl::Hidden, cl::init("sm_87"),   // default: sm_87 (NVIDIA Jetson Orin)
   cl::desc("Target a specific GPU architecture in swift-to-ptx pass"));
 
 static cl::opt<StringRef> TargetFeatures (
   "swift-to-ptx-target-attr", cl::Hidden, cl::init("+ptx81"), // default: +ptx81 (highest version supported by LLVM-17 and CUDA-12.2|L4T R36.3)
   cl::desc("Target specific attributes in swift-to-ptx pass"));
 
-static cl::opt<bool> StripDeviceDebugInfo (
+static cl::opt<bool> StripDebugInfo (
   "swift-to-ptx-strip-debug-info", cl::Hidden, cl::init(false),
   cl::desc("Strip debug information from device code"));
 
@@ -818,8 +818,9 @@ ArrayRef<uint8_t> CreateKernel
   // combinations of Swift/CUDA due to bugs in LLVM. Debug information will only
   // be present if already enabled as part of the swift compilation pipeline
   // (default), it will not be generated as part of this plugin.
-  if (StripDeviceDebugInfo)
-    StripDebugInfo(*M);
+  if (StripDebugInfo) {
+    llvm::StripDebugInfo(*M);
+  }
 
   // Update the kernel function to call the main (entry) function from the set
   // that we extracted in the previous step.
