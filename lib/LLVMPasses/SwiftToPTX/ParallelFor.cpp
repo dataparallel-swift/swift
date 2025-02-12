@@ -888,8 +888,8 @@ ArrayRef<uint8_t> CreateKernel
   // ...and named metadata
   for (auto &I : SrcModule.named_metadata()) {
     NamedMDNode *NMD = M->getOrInsertNamedMetadata(I.getName());
-    for (const MDNode *N : I.operands())
-      NMD->addOperand(MapMetadata(N, VMap));
+    for (const MDNode *MD : I.operands())
+      NMD->addOperand(MapMetadata(MD, VMap));
   }
 #endif
 
