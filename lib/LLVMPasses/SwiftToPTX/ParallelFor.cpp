@@ -1054,7 +1054,24 @@ void UpdateClosureEnvironment (
           if (Argument* A = dyn_cast<Argument>(V)) {
             for (auto U : A->users()) {
               if (LoadInst* I = dyn_cast<LoadInst>(U)) {
-                ApplyCopyOnWriteHandler(Context, M, I, Handler, I->getNextNonDebugInstruction(), A);
+                auto Unique = ApplyCopyOnWriteHandler(Context, M, I, Handler, I->getNextNonDebugInstruction(), A);
+                auto InsertBefore = Unique->getNextNonDebugInstruction();
+
+                // The load that this function argument is stored in may have
+                // been allocated in non-device-accessible memory by the calling
+                // function (i.e. an alloca). Replace the input argument with a
+                // locally defined alloca and replace subsequent uses of the
+                // input argument with this pointer. The subsequent steps of
+                // closure conversion will translate this into a host memory
+                // (de)allocation that is device accessible.
+                auto NewA = new AllocaInst(I->getPointerOperandType(), I->getPointerAddressSpace(), "", InsertBefore);
+                new StoreInst(Unique, NewA, InsertBefore);
+
+                DominatorTree DT(*Unique->getFunction());
+                A->replaceUsesWithIf(NewA, [&](Use &U){
+                    return DT.dominates(NewA, U);
+                    });
+
                 break;
               }
             }
