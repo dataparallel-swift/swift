@@ -553,47 +553,6 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
   }
 }
 
-#if false
-bool isAcceptableChar(char c) {
-  return isAlnum(c) || c == '_' || c == '$' || c == '.' || c == '@';
-}
-
-bool isValidUnquotedName(StringRef Name) {
-  assert (!Name.empty());
-
-  for (auto c : Name) {
-    if (!isAcceptableChar(c))
-      return false;
-  }
-
-  return true;
-}
-
-std::string makeValidUnquotedName(StringRef Name)
-{
-  // Avoid the extra allocation if possible
-  if (isValidUnquotedName(Name))
-    return Name.str();
-
-  std::string Encoded;
-  Encoded.reserve(Name.size());
-
-  for (auto c : Name) {
-    if (isAcceptableChar(c)) {
-      Encoded.push_back(c);
-    } else {
-      if (c == ' ') {
-        Encoded.push_back('_');
-      } else {
-        Encoded.append(utohexstr(c));
-      }
-    }
-  }
-
-  return Encoded;
-}
-#endif
-
 std::optional<StringRef> getGlobalInitializerString(Value* Value)
 {
   std::optional<StringRef> R = {};
