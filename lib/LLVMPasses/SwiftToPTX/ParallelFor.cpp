@@ -103,6 +103,10 @@ define internal void @body(i64 %0, ptr nonnull %1) {
   ret void
 }
 
+define internal zeroext i1 @swift_isUniquelyReferenced_nonNull_native(ptr nonnull %0) {
+   ret i1 true
+}
+
 ; Function Attrs: nofree nosync nounwind readnone
 declare i32 @llvm.nvvm.read.ptx.sreg.ctaid.x() #1
 
@@ -288,6 +292,20 @@ const StringMap<StringRef> libdeviceFunctions =
   /* ,{"llvm.fshl.*",          ""} */
   /* ,{"llvm.fshr.*",          ""} */
   };
+
+
+// Swift will apply scalar replacement of aggregates in order to pass struct
+// (components) in registers for function calls.
+//
+// Somewhat ironically, we repackage those components again to make it a bit
+// more convenient to work with, and hope that the (C++) compiler again does the
+// same thing to make our function calls more efficient. We should really check
+// whether it does...
+typedef std::tuple<Value*, Value*, Value*> CUDAContext;
+typedef std::tuple<Value*, Value*, Value*> CachingHostAllocator;
+
+typedef std::pair<uint64_t, uint64_t> COWIndex;
+typedef std::function<Instruction*(Value*, Instruction*)> COWHandler;
 
 
 // Return the location of the libdevice bitcode file.
@@ -704,12 +722,14 @@ GlobalValue* newStaticString(LLVMContext& Context, Module& Module, std::string S
 // we cleanly separate this we should be able to compile multiple units
 // concurrently, which could be useful.
 //
+template <unsigned N>
 ArrayRef<uint8_t> CreateKernel
 (
     LLVMContext& Context,
     Module& SrcModule,
     StringRef Main,
-    SetVector<GlobalValue*> GVs
+    SmallPtrSet<GlobalValue*, N> GVs,
+    SmallDenseMap<COWIndex, COWHandler>& ToCoW
 )
 {
   SMDiagnostic Err;
@@ -719,6 +739,11 @@ ArrayRef<uint8_t> CreateKernel
     Err.print("swift-to-ptx<parallel_for>", errs());
     exit(1);
   }
+
+  // As we loop over the functions in the kernel, keep track of any captured
+  // environment variables that need their copy-on-write handlers lifted out of
+  // the kernel body.
+  Function* isUniquelyReferenced = M->getFunction("swift_isUniquelyReferenced_nonNull_native");
 
 #if DEBUG_CLONE_ALL_GLOBALS
   // Loop over all of the global variables, making corresponding globals in the
@@ -756,6 +781,14 @@ ArrayRef<uint8_t> CreateKernel
         }
         VMap[Src] = M->getFunction(Lib);;
         continue;
+    }
+
+    // If this is a declaration related to the CoW mechanism, redirect it to the
+    // stub implementation. The actual functionality will be lifted outside of
+    // the parallel section as part of updating the closure environment.
+    if (Name == "swift_isUniquelyReferenced_nonNull_native") {
+      VMap[Src] = isUniquelyReferenced;
+      continue;
     }
 
     // Otherwise, this is just a regular function (declaration). Just make the
@@ -889,6 +922,68 @@ ArrayRef<uint8_t> CreateKernel
     }
   }
 
+  // Determine the position in the closure environment and corresponding handler
+  // for any objects that need their functionality lifted outside of the kernel.
+  for (auto U : isUniquelyReferenced->users()) {
+    LoadInst* Arg = cast<LoadInst>(cast<CallBase>(U)->getOperand(0));
+    uint64_t Index0, Index1;
+
+    // Interrogate the partial-apply forwarder to determine the position in the
+    // closure environment that this argument was loaded from.
+    if (auto I = dyn_cast<Argument>(Arg->getPointerOperand())) {
+      CallBase* CB = cast<CallBase>(I->getParent()->getUniqueUndroppableUser());
+      LoadInst* L  = cast<LoadInst>(CB->getOperand(I->getArgNo()));
+      GetElementPtrInst* GEP = cast<GetElementPtrInst>(L->getPointerOperand());
+
+      assert(2 == GEP->getNumIndices());
+      Index0 = cast<ConstantInt>(GEP->getOperand(1))->getZExtValue();
+      Index1 = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
+    }
+
+    // Locate the copy-on-write handler for this argument
+    for (auto U : Arg->users()) {
+      if (auto I = dyn_cast<CallInst>(U)) {
+        // We should encounter only two function calls, the
+        // isUniquelyReferenced() call that led us here...
+        if (I->getCalledFunction() == isUniquelyReferenced) {
+          continue;
+        }
+
+        // ... and the copy-on-write handler. Create and return a closure that
+        // that will apply the CoW handler to the given operand, once we have
+        // it. We need to do a bit of work first to ensure that the returned
+        // closure only captures values from the source module, not the
+        // currently-under-construction kernel module.
+        unsigned InsertAt = 0;
+        CallInst::TailCallKind TCK = I->getTailCallKind();
+        Function* F = SrcModule.getFunction(I->getCalledFunction()->getName());
+        std::vector<Value *> Params(I->arg_size());
+
+        for (unsigned i = 0; i < I->arg_size(); ++i) {
+          auto A = I->getArgOperand(i);
+          if (Arg == A) {
+            InsertAt = i;
+          }
+          else if (isa<GlobalValue>(A)) {
+            Params[i] = SrcModule.getNamedValue(A->getName());
+          } else {
+            LLVM_DEBUG(dbgs() << "Unhandled argument when capturing CoW handler\n");
+          }
+        }
+
+        auto Handler = [=](Value* Operand, Instruction* InsertBefore) mutable -> Instruction* {
+          Params[InsertAt] = Operand;
+          CallInst* CI = CallInst::Create(F->getFunctionType(), F, Params, "", InsertBefore);
+          CI->setTailCallKind(TCK);
+          return CI;
+        };
+
+        ToCoW.insert({{Index0, Index1}, Handler});
+        break;
+      }
+    }
+  }
+
   // Strip debug information from device code. This may be necessary on some
   // combinations of Swift/CUDA due to bugs in LLVM. Debug information will only
   // be present if already enabled as part of the swift compilation pipeline
@@ -997,23 +1092,120 @@ ArrayRef<uint8_t> CreateKernel
 }
 
 
-// Swift will apply scalar replacement of aggregates in order to pass struct
-// (components) in registers for function calls.
-//
-// Somewhat ironically, we repackage those components again to make it a bit
-// more convenient to work with, and hope that the (C++) compiler again does the
-// same thing to make our function calls more efficient. We should really check
-// whether it does...
-typedef std::tuple<Value*, Value*, Value*> CUDAContext;
-typedef std::tuple<Value*, Value*, Value*> CachingHostAllocator;
+Instruction* ApplyCopyOnWriteHandler (
+    LLVMContext& Context,
+    Module& M,
+    Value* P,
+    COWHandler Handler,
+    Instruction* InsertBefore,
+    Value* StoreAt=nullptr
+)
+{
+    // Add a uniqueness check to determine whether we need to run the
+    // copy-on-write handler or not.
+    auto F = M.getFunction("swift_isUniquelyReferenced_nonNull_native");
+    auto IsUnique = CallInst::Create(F->getFunctionType(), F, { P }, "", InsertBefore);
+    IsUnique->setTailCall(true);
+
+    // Split the original basic block, inserting an else-branch to run the
+    // handler. Optionally also store this updated value at the given location
+    // (only in the else branch).
+    auto NewBB = SplitBlockAndInsertIfElse(IsUnique, InsertBefore, /* unreachable */ false);
+    auto Q = Handler(P, NewBB);
+    if (StoreAt)
+      new StoreInst(Q, StoreAt, NewBB);
+
+    // Tie the branches together...
+    PHINode* PHI = PHINode::Create(P->getType(), 2, "", InsertBefore);
+    PHI->addIncoming(P, IsUnique->getParent());
+    PHI->addIncoming(Q, Q->getParent());
+
+    // ...and replace any uses of the original term with our now safely handled
+    // version (only uses which are dominated by it)
+    DominatorTree DT(*PHI->getFunction());
+    P->replaceUsesWithIf(PHI, [&](Use &U){
+        return DT.dominates(PHI, U);
+        });
+
+    return PHI;
+}
+
+// Update the closure environment to include the given copy-on-write handlers
+// that have been identified and pulled out of the kernel body. 
+void UpdateClosureEnvironment (
+    LLVMContext& Context,
+    Module& M,
+    Value* P,
+    SmallDenseMap<COWIndex, COWHandler> COWs
+)
+{
+  if (auto Alloca = dyn_cast<AllocaInst>(P)) {
+    for (auto U : Alloca->users()) {
+      if (auto GEP = dyn_cast<GetElementPtrInst>(U)) {
+        for (auto& [Indices, Handler] : COWs) {
+          if (GEP->getNumIndices() != 2)
+            continue;
+
+          auto& [Ix0, Ix1] = Indices;
+          ConstantInt* Index0 = dyn_cast<ConstantInt>(GEP->getOperand(1));
+          ConstantInt* Index1 = dyn_cast<ConstantInt>(GEP->getOperand(2));
+
+          if (!Index0 || Index0->getZExtValue() != Ix0)
+            continue;
+
+          if (!Index1 || Index1->getZExtValue() != Ix1)
+            continue;
+
+          // This is the GEP that stores the part of the closure we are
+          // interested in into the closure environment. There are different
+          // cases to handle in how this argument was used, for example whether
+          // the parameter is an argument to the calling function, or was
+          // created in the local scope (e.g. allocating a new empty array).
+          assert(GEP->hasOneUse());
+          StoreInst* S = cast<StoreInst>(GEP->getUniqueUndroppableUser());
+          Value* V = S->getValueOperand();
+
+          // This was created in the local scope
+          if (AllocaInst* A = dyn_cast<AllocaInst>(V)) {
+            for (auto U : A->users()) {
+              if (StoreInst* I = dyn_cast<StoreInst>(U)) {
+                if (I->getPointerOperand() != A)
+                  continue;
+
+                auto Unique = ApplyCopyOnWriteHandler(Context, M, I->getValueOperand(), Handler, I);
+                auto NewI = new StoreInst(Unique, I->getPointerOperand(), I->isVolatile(), I->getAlign());
+
+                ReplaceInstWithInst(I, NewI);
+                break;
+              }
+            }
+            continue;
+          }
+
+          // This was given as an argument to the function
+          if (Argument* A = dyn_cast<Argument>(V)) {
+            for (auto U : A->users()) {
+              if (LoadInst* I = dyn_cast<LoadInst>(U)) {
+                ApplyCopyOnWriteHandler(Context, M, I, Handler, I->getNextNonDebugInstruction(), A);
+                break;
+              }
+            }
+            continue;
+          }
+        }
+      }
+
+      /* Ignore other users */
+    }
+  }
+  else {
+    LLVM_DEBUG(dbgs() << "UpdateClosureEnvironment(update copy-on-write): unhandled instruction: " << *P << "\n");
+  }
+}
+
 
 // Update the environment so that its contents are accessible from the device.
-// This is the recursive overload of UpdateClosureEnvironment() that does all
-// the work; the other overload is the one is the entry point that does the
-// setup and finalisation work.
-//
-// This is perhaps the most tedious part of the entire operation. There are a
-// few different cases to handle:
+// There are a few different cases to handle:
 //
 //   1. alloca instructions (temporary allocations on the stack) are converted
 //      into a allocation using cuMemAllocHost(), which must then be deallocated
@@ -1027,13 +1219,16 @@ typedef std::tuple<Value*, Value*, Value*> CachingHostAllocator;
 //      environment instead. The main difficulty here is that we need to know
 //      the size of the allocation.
 //
-//      XXX: It might be better that at the Swift layer we provide our own Array
-//      type/extension that always allocated into pinned memory, so that the
-//      host and device pointers (on the Orin) are the same, and thus no extra
-//      work needs to happen.
+//      UPDATE: Because I ran into issues with making host heap allocations
+//      ex-post-facto accessible to the device, we have instead changed the
+//      swift runtime such that the underlying allocator can be replaced with
+//      the CUDA allocator by the swift-to-ptx library. This means that any
+//      memory allocated by the swift runtime always has the same pointer on the
+//      host and the device, so address mangling no longer needs to happen.
 //
 // We need to do this recursively because the closure may consist of many layers
-// of indirection.
+// of indirection. XXX: Check this, it may have more structure than this,
+// especially now that we don't need to do address rewriting.
 //
 template <unsigned N>
 void UpdateClosureEnvironment (
@@ -1044,7 +1239,7 @@ void UpdateClosureEnvironment (
     CUDAContext CUDA,
     CachingHostAllocator Allocator,
     Value* Event,
-    SmallVector<Instruction*>& ToErase,
+    SmallPtrSet<Instruction*, N>& ToErase,
     SmallPtrSet<Value*, N>& ToFree
 )
 {
@@ -1176,7 +1371,7 @@ void UpdateClosureEnvironment (
       StringRef Name = F->getName();
       if (Name.starts_with("llvm.lifetime.start")) {
         // Assume that we will encounter the corresponding .end()
-        ToErase.push_back(I);
+        ToErase.insert(I);
       }
       else if (Name.starts_with("llvm.lifetime.end")) {
         // Assume that we will encounter the corresponding .start()
@@ -1186,7 +1381,7 @@ void UpdateClosureEnvironment (
         Free->setCallingConv(CallingConv::Swift);
         Free->insertAfter(I);
         ToFree.erase(Alloca);
-        ToErase.push_back(I);
+        ToErase.insert(I);
       }
     }
   }
@@ -1200,10 +1395,12 @@ void UpdateClosureEnvironment (
   }
 }
 
+
 // This is the entry point to UpdateClosureEnvironment(). This handles some
 // setup and finalisation. The other overload of this function is the recursive
 // one that does all the hard work.
 //
+template <unsigned N=16>
 void UpdateClosureEnvironment (
     LLVMContext& Context,
     Module& M,
@@ -1211,12 +1408,16 @@ void UpdateClosureEnvironment (
     Value* Env,
     CUDAContext CUDA,
     CachingHostAllocator Allocator,
-    Value* Event
+    Value* Event,
+    SmallDenseMap<COWIndex, COWHandler> ToCoW
 )
 {
-  SmallVector<Instruction*> ToErase;
-  SmallPtrSet<Value*, 8> ToFree;
+  SmallPtrSet<Instruction*, N> ToErase;
+  SmallPtrSet<Value*, N> ToFree;
   Function *Parent = cast<Instruction>(Env)->getFunction();
+
+  // Lift any copy-on-write handlers out of the kernel body
+  UpdateClosureEnvironment(Context, M, Env, ToCoW);
 
   // Recursively marshal the closure environment to device-accessible memory
   UpdateClosureEnvironment(Context, M, Body, Env, CUDA, Allocator, Event, ToErase, ToFree);
@@ -1427,7 +1628,7 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
       Value* Env = CI->getArgOperand(9);
 
       // The function we are interested in lifting as the body of a parallel loop
-      SetVector<GlobalValue*> GVs;
+      SmallPtrSet<GlobalValue*, 16> GVs;
       auto F = cast<Function>(Body);
       GVs.insert(F);
 
@@ -1456,7 +1657,8 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
 
       // Generate PTX assembly for the (set of) functions called by the
       // `parallel_for` launcher, and embed the generated code into the module
-      ArrayRef<uint8_t> Obj = CreateKernel(Context, M, Body->getName(), GVs);
+      SmallDenseMap<COWIndex, COWHandler> ToCoW;
+      ArrayRef<uint8_t> Obj = CreateKernel(Context, M, Body->getName(), GVs, ToCoW);
       size_t buffer_size = Obj.size();
       IntegerType* i8_t = IntegerType::getInt8Ty(Context);
       ArrayType* image_t = ArrayType::get(i8_t, buffer_size);
@@ -1493,7 +1695,7 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
       ReplaceInstWithInst(CI, CIpar);
 
       // Update the closure environment so that its contents are accessible from the device
-      UpdateClosureEnvironment(Context, M, Body, Env, { Context0, Context1, Context2 }, { Allocator0, Allocator1, Allocator2 }, CIpar);
+      UpdateClosureEnvironment(Context, M, Body, Env, { Context0, Context1, Context2 }, { Allocator0, Allocator1, Allocator2 }, CIpar, ToCoW);
     }
   }
 
