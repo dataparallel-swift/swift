@@ -44,6 +44,7 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "swift-to-ptx"
+#define DEBUG_CLONE_ALL_GLOBALS false
 
 namespace {
 
@@ -706,25 +707,39 @@ GlobalValue* newStaticString(LLVMContext& Context, Module& Module, std::string S
 ArrayRef<uint8_t> CreateKernel
 (
     LLVMContext& Context,
-    Module& Src,
+    Module& SrcModule,
     StringRef Main,
     SetVector<GlobalValue*> GVs
 )
 {
   SMDiagnostic Err;
+  ValueToValueMapTy VMap;
   std::unique_ptr<Module> M = parseAssembly(parallel_for_kernel, Err, Context);
   if (!M) {
     Err.print("swift-to-ptx<parallel_for>", errs());
     exit(1);
   }
 
+#if DEBUG_CLONE_ALL_GLOBALS
+  // Loop over all of the global variables, making corresponding globals in the
+  // new module. Here we add them to the VMap and to the new Module. We don't
+  // worry about attributes or initialisers yet, those will come later.
+  for (auto &I : SrcModule.globals()) {
+    if (I.getName() == "llvm.used")
+      continue;
+
+    GlobalVariable *GV = new GlobalVariable(*M, I.getValueType(), I.isConstant(), I.getLinkage(), nullptr, I.getName(), nullptr, I.getThreadLocalMode(), I.getType()->getAddressSpace());
+    GV->copyAttributesFrom(&I);
+    VMap[&I] = GV;
+  }
+#endif
+
   // Loop over all of the functions that we need to copy from the input module.
   // Just make the declarations, the bodies will come later. Take care of
   // functions that need to be handled specially on the device.
-  ValueToValueMapTy VMap;
   bool HaveLibdevice = false;
-  for (auto &GV : GVs) {
-    Function *Src = cast<Function>(GV);
+  for (auto I : GVs) {
+    Function *Src = cast<Function>(I);
 
     // If this is a declaration for a function provided by libdevice (e.g.
     // llvm.sin.f32) then link in the libdevice module and record in the VMap the
@@ -750,13 +765,50 @@ ArrayRef<uint8_t> CreateKernel
     VMap[Src] = Dst;
   }
 
-  // Copy over the function bodies. Also enable floating point contraction for
-  // compatible instructions.
-  for (auto &GV : GVs) {
-    if (GV->isDeclaration())
+#if DEBUG_CLONE_ALL_GLOBALS
+  // Loop over the aliases...
+  for (auto &I : SrcModule.aliases()) {
+    GlobalAlias *GA = GlobalAlias::create(I.getValueType(), I.getType()->getPointerAddressSpace(), I.getLinkage(), I.getName(), M.get());
+    GA->copyAttributesFrom(&I);
+    VMap[&I] = GA;
+  }
+
+  // ...and indirect functions in the module
+  for (auto &I : SrcModule.ifuncs()) {
+    // Defer setting the resolver function until after functions are cloned.
+    GlobalIFunc *GI = GlobalIFunc::create(I.getValueType(), I.getAddressSpace(), I.getLinkage(), I.getName(), nullptr, M.get());
+    GI->copyAttributesFrom(&I);
+    VMap[&I] = GI;
+  }
+
+  // Now that all the things that a global variable initialiser can refer to
+  // have been created, loop through and copy the global variable referees over.
+  // Also set the attributes on the global now.
+  for (auto &I : SrcModule.globals()) {
+    GlobalVariable* GV = cast_if_present<GlobalVariable>(VMap[&I]);
+    if (!GV)
       continue;
 
-    Function *Src = cast<Function>(GV);
+    SmallVector<std::pair<unsigned, MDNode*>, 1> MDs;
+    I.getAllMetadata(MDs);
+    for (auto MD : MDs)
+      GV->addMetadata(MD.first, *MapMetadata(MD.second, VMap));
+
+    if (I.isDeclaration())
+      continue;
+
+    if (I.hasInitializer())
+      GV->setInitializer(MapValue(I.getInitializer(), VMap));
+  }
+#endif
+
+  // Copy over the function bodies. Also enable floating point contraction for
+  // compatible instructions.
+  for (auto I : GVs) {
+    if (I->isDeclaration())
+      continue;
+
+    Function *Src = cast<Function>(I);
     Function *Dst = cast<Function>(VMap[Src]);
 
     Function::arg_iterator DstI = Dst->arg_begin();
@@ -784,6 +836,29 @@ ArrayRef<uint8_t> CreateKernel
       }
     }
   }
+
+#if DEBUG_CLONE_ALL_GLOBALS
+  // Copy over any remaining definitions...
+  for (auto &I : SrcModule.aliases()) {
+    GlobalAlias* GA = cast<GlobalAlias>(VMap[&I]);
+    if (const Constant *C = I.getAliasee())
+      GA->setAliasee(MapValue(C, VMap));
+  }
+
+  // ...indirect functions...
+  for (auto &I : SrcModule.ifuncs()) {
+    GlobalIFunc *GI = cast<GlobalIFunc>(VMap[&I]);
+    if (const Constant *Resolver = I.getResolver())
+      GI->setResolver(MapValue(Resolver, VMap));
+  }
+
+  // ...and named metadata
+  for (auto &I : SrcModule.named_metadata()) {
+    NamedMDNode *NMD = M->getOrInsertNamedMetadata(I.getName());
+    for (const MDNode *N : I.operands())
+      NMD->addOperand(MapMetadata(N, VMap));
+  }
+#endif
 
   // Replace swift error handling functions with equivalents that we can call
   // from the device
