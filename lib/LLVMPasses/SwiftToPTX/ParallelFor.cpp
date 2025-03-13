@@ -74,7 +74,7 @@ target datalayout = "e-i64:64-v16:16-v32:32-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
 
 ; Function Attrs: argmemonly nofree nosync nounwind
-define void @parallel_for(i64 %iterations, ptr nonnull %env) local_unnamed_addr #0 {
+define void @parallel_for(i64 %iterations, ptr nonnull %env, ptr noalias nocapture swifterror dereferenceable(8) %swifterror, ptr nocapture readnone %thrownerror) local_unnamed_addr #0 {
 entry:
   %0 = tail call i32 @llvm.nvvm.read.ptx.sreg.nctaid.x() #2
   %1 = tail call i32 @llvm.nvvm.read.ptx.sreg.ntid.x() #2
@@ -90,7 +90,7 @@ entry:
 
 while1.top:                                       ; preds = %entry, %while1.top
   %10 = phi i64 [ %11, %while1.top ], [ %8, %entry ]
-  call void @body(i64 %10, ptr nonnull %env)
+  call swiftcc void @body(i64 %10, ptr nonnull %env, ptr noalias nocapture swifterror dereferenceable(8) %swifterror, ptr nocapture readnone %thrownerror)
   %11 = add i64 %10, %3
   %12 = icmp slt i64 %11, %iterations
   br i1 %12, label %while1.top, label %while1.exit
@@ -99,12 +99,17 @@ while1.exit:                                      ; preds = %while1.top, %entry
   ret void
 }
 
-define internal void @body(i64 %0, ptr nonnull %1) {
+define internal swiftcc void @body(i64 %0, ptr nonnull %1, ptr noalias nocapture swifterror dereferenceable(8) %2, ptr nocapture readnone %3) {
   ret void
 }
 
 define internal zeroext i1 @swift_isUniquelyReferenced_nonNull_native(ptr nonnull %0) {
-   ret i1 true
+  ret i1 true
+}
+
+define internal void @nanosleep(i32 %0) {
+  tail call void asm sideeffect "nanosleep.u32 $0;", "r"(i32 %0) #3
+  ret void
 }
 
 ; Function Attrs: nofree nosync nounwind readnone
@@ -162,22 +167,31 @@ declare swiftcc void @"$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCt
 ;                                                                                   │    ╰─────────────────── ready event
 ;                                                                                   ╰──────────────────────── pointer to free
 
-; SwiftToPTX.parallel_for(iterations: Swift.Int, context: SwiftToPTX.Context, allocator: SwiftToPTX.CachingHostAllocator, stream: SwiftToPTX.Stream, _: (Swift.Int) -> ()) -> SwiftToPTX.Event
-declare swiftcc ptr @"$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventCSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtF"(i64, ptr, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr) local_unnamed_addr #0
-;                                                                                                                                                           │     ╰────┬────╯   ╰────┬────╯    │    │    ╰──── closure environment
-;                                                                                                                                                           │          │             │         │    ╰───────── body of the parallel_for loop
-;                                                                                                                                                           │          │             │         ╰────────────── execution stream
-;                                                                                                                                                           │          │             ╰──────────────────────── SwiftToPTX.CachingHostAllocator
-;                                                                                                                                                           │          ╰────────────────────────────────────── SwiftToPTX.Context
-;                                                                                                                                                           ╰───────────────────────────────────────────────── iterations
+; SwiftToPTX.parallel_for<A where A: Swift.Error>(iterations: Swift.Int, context: SwiftToPTX.Context, allocator: SwiftToPTX.CachingHostAllocator, stream: SwiftToPTX.Stream, _: (Swift.Int) throws(A) -> ()) throws(A) -> SwiftToPTX.Event
+declare swiftcc ptr @"$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventCSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySixYKXEtxYKs5ErrorRzlF"(
+    i64,                                                  ; iterations
+    ptr, i64, i64,                                        ; SwiftToPTX.Context
+    ptr, ptr, ptr,                                        ; SwiftToPTX.CachingHostAllocator
+    ptr,                                                  ; execution stream
+    ptr,                                                  ; body of the parallel_for loop
+    ptr,                                                  ; closure environment
+    ptr,                                                  ; type metadata for A
+    ptr,                                                  ; protocol witness table for A
+    ptr swiftself,                                        ; swift self
+    ptr noalias nocapture swifterror dereferenceable(8),  ; swift error
+    ptr nocapture readnone                                ; thrown error
+  ) local_unnamed_addr #0
 
-; SwiftToPTX.launch_parallel_for(iterations: Swift.Int, kernel: inout SwiftToPTX.ParallelForKernel, env: Swift.UnsafeMutableRawPointer, context: SwiftToPTX.Context, stream: SwiftToPTX.Stream) -> SwiftToPTX.Event
-declare swiftcc ptr @"$s10SwiftToPTX19launch_parallel_for10iterations6kernel3env7context6streamAA5EventCSi_AA17ParallelForKernelVzSvAA7ContextVAA6StreamVtF"(i64, ptr nocapture dereferenceable(32), ptr, ptr, i64, i64, ptr) local_unnamed_addr #0
-;                                                                                                                                                             │    │                                  │    ╰────┬────╯    ╰──── execution stream
-;                                                                                                                                                             │    │                                  │         ╰────────────── SwiftToPTX.Context
-;                                                                                                                                                             │    │                                  ╰──────────────────────── closure environment (updated to be GPU accessible)
-;                                                                                                                                                             │    ╰─────────────────────────────────────────────────────────── SwiftToPTX.ParallelForKernel struct
-;                                                                                                                                                             ╰──────────────────────────────────────────────────────────────── iterations
+; SwiftToPTX.launch_parallel_for(iterations: Swift.Int, context: SwiftToPTX.Context, stream: SwiftToPTX.Stream, kernel: inout SwiftToPTX.ParallelForKernel, env: Swift.UnsafeMutableRawPointer, swifterror: Swift.UnsafeMutableRawPointer, thrownerror: Swift.UnsafeMutableRawPointer) -> SwiftToPTX.Event
+declare swiftcc ptr @"$s10SwiftToPTX19launch_parallel_for10iterations7context6stream6kernel3env10swifterror11thrownerrorAA5EventCSi_AA7ContextVAA6StreamVAA17ParallelForKernelVzS3vtF"(
+    i64,                                                  ; iterations
+    ptr, i64, i64,                                        ; SwiftToPTX.Context
+    ptr,                                                  ; execution stream
+    ptr nocapture dereferenceable(32),                    ; SwiftToPTX.ParallelForKernel struct
+    ptr,                                                  ; closure environment (updated to be accessible from the GPU)
+    ptr noalias nocapture dereferenceable(8),             ; swift error (passed to kernel)
+    ptr nocapture readnone                                ; thrown error (passed to kernel)
+  ) local_unnamed_addr #0
 
 attributes #0 = { "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
 attributes #1 = { sspreq "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
@@ -294,6 +308,12 @@ const StringMap<StringRef> libdeviceFunctions =
   };
 
 
+const StringMap<StringRef> stubFunctions =
+  {{"swift_isUniquelyReferenced_nonNull_native",  "swift_isUniquelyReferenced_nonNull_native"}
+  ,{"$s10SwiftToPTX9nanosleepyys6UInt32VF",       "nanosleep"}
+  };
+
+
 // Swift will apply scalar replacement of aggregates in order to pass struct
 // (components) in registers for function calls.
 //
@@ -303,9 +323,6 @@ const StringMap<StringRef> libdeviceFunctions =
 // whether it does...
 typedef std::tuple<Value*, Value*, Value*> CUDAContext;
 typedef std::tuple<Value*, Value*, Value*> CachingHostAllocator;
-
-typedef std::pair<uint64_t, uint64_t> COWIndex;
-typedef std::function<Instruction*(Value*, Instruction*)> COWHandler;
 
 
 // Return the location of the libdevice bitcode file.
@@ -594,34 +611,37 @@ template <unsigned N>
 ArrayRef<uint8_t> CreateKernel
 (
     LLVMContext& Context,
-    Module& SrcModule,
+    Module& M,
     StringRef Main,
     SmallPtrSet<GlobalValue*, N> GVs,
-    SmallDenseMap<COWIndex, COWHandler>& ToCoW
+    SmallPtrSet<GlobalValue*, N> DeclOnlyGVs,
+    ValueToValueMapTy& IndirectMap
 )
 {
   SMDiagnostic Err;
-  ValueToValueMapTy VMap;
-  std::unique_ptr<Module> M = parseAssembly(parallel_for_kernel, Err, Context);
-  if (!M) {
+  std::unique_ptr<Module> K = parseAssembly(parallel_for_kernel, Err, Context);
+  if (!K) {
     Err.print("swift-to-ptx<parallel_for>", errs());
     exit(1);
   }
 
-  // As we loop over the functions in the kernel, keep track of any captured
-  // environment variables that need their copy-on-write handlers lifted out of
-  // the kernel body.
-  Function* isUniquelyReferenced = M->getFunction("swift_isUniquelyReferenced_nonNull_native");
+  // Initially populate the VMap with operations that will be handled by the
+  // kernel skeleton, rather than copied over from the source module.
+  ValueToValueMapTy VMap;
+  for (auto &[Src,Dst] : stubFunctions) {
+    if (auto F = M.getFunction(Src))
+      VMap[F] = K->getFunction(Dst);
+  }
 
 #if DEBUG_CLONE_ALL_GLOBALS
   // Loop over all of the global variables, making corresponding globals in the
   // new module. Here we add them to the VMap and to the new Module. We don't
   // worry about attributes or initialisers yet, those will come later.
-  for (auto &I : SrcModule.globals()) {
+  for (auto &I : M.globals()) {
     if (I.getName() == "llvm.used")
       continue;
 
-    GlobalVariable *GV = new GlobalVariable(*M, I.getValueType(), I.isConstant(), I.getLinkage(), nullptr, I.getName(), nullptr, I.getThreadLocalMode(), I.getType()->getAddressSpace());
+    GlobalVariable *GV = new GlobalVariable(*K, I.getValueType(), I.isConstant(), I.getLinkage(), nullptr, I.getName(), nullptr, I.getThreadLocalMode(), I.getType()->getAddressSpace());
     GV->copyAttributesFrom(&I);
     VMap[&I] = GV;
   }
@@ -631,7 +651,8 @@ ArrayRef<uint8_t> CreateKernel
   // Just make the declarations, the bodies will come later. Take care of
   // functions that need to be handled specially on the device.
   bool HaveLibdevice = false;
-  for (auto I : GVs) {
+  DeclOnlyGVs.insert(GVs.begin(), GVs.end());
+  for (auto I : DeclOnlyGVs) {
     Function *Src = cast<Function>(I);
 
     // If this is a declaration for a function provided by libdevice (e.g.
@@ -644,40 +665,32 @@ ArrayRef<uint8_t> CreateKernel
     StringRef Lib  = libdeviceFunctions.lookup(Name);
     if (!Lib.empty()) {
         if (!HaveLibdevice) {
-          LinkInLibdeviceModule(*M, Context);
+          LinkInLibdeviceModule(*K, Context);
           HaveLibdevice = true;
         }
-        VMap[Src] = M->getFunction(Lib);;
+        VMap[Src] = K->getFunction(Lib);
         continue;
-    }
-
-    // If this is a declaration related to the CoW mechanism, redirect it to the
-    // stub implementation. The actual functionality will be lifted outside of
-    // the parallel section as part of updating the closure environment.
-    if (Name == "swift_isUniquelyReferenced_nonNull_native") {
-      VMap[Src] = isUniquelyReferenced;
-      continue;
     }
 
     // Otherwise, this is just a regular function (declaration). Just make the
     // declaration, we'll copy over the function body later.
-    Function* Dst = Function::Create(Src->getFunctionType(), Src->getLinkage(), Name, *M);
+    Function* Dst = Function::Create(Src->getFunctionType(), Src->getLinkage(), Name, *K);
     Dst->copyAttributesFrom(Src);
     VMap[Src] = Dst;
   }
 
 #if DEBUG_CLONE_ALL_GLOBALS
   // Loop over the aliases...
-  for (auto &I : SrcModule.aliases()) {
-    GlobalAlias *GA = GlobalAlias::create(I.getValueType(), I.getType()->getPointerAddressSpace(), I.getLinkage(), I.getName(), M.get());
+  for (auto &I : M.aliases()) {
+    GlobalAlias *GA = GlobalAlias::create(I.getValueType(), I.getType()->getPointerAddressSpace(), I.getLinkage(), I.getName(), K.get());
     GA->copyAttributesFrom(&I);
     VMap[&I] = GA;
   }
 
   // ...and indirect functions in the module
-  for (auto &I : SrcModule.ifuncs()) {
+  for (auto &I : M.ifuncs()) {
     // Defer setting the resolver function until after functions are cloned.
-    GlobalIFunc *GI = GlobalIFunc::create(I.getValueType(), I.getAddressSpace(), I.getLinkage(), I.getName(), nullptr, M.get());
+    GlobalIFunc *GI = GlobalIFunc::create(I.getValueType(), I.getAddressSpace(), I.getLinkage(), I.getName(), nullptr, K.get());
     GI->copyAttributesFrom(&I);
     VMap[&I] = GI;
   }
@@ -685,7 +698,7 @@ ArrayRef<uint8_t> CreateKernel
   // Now that all the things that a global variable initialiser can refer to
   // have been created, loop through and copy the global variable referees over.
   // Also set the attributes on the global now.
-  for (auto &I : SrcModule.globals()) {
+  for (auto &I : M.globals()) {
     GlobalVariable* GV = cast_if_present<GlobalVariable>(VMap[&I]);
     if (!GV)
       continue;
@@ -704,7 +717,7 @@ ArrayRef<uint8_t> CreateKernel
 #endif
 
   // Copy over the function bodies. Also enable floating point contraction for
-  // compatible instructions.
+  // compatible instructions and specialise indirect function calls.
   for (auto I : GVs) {
     if (I->isDeclaration())
       continue;
@@ -722,40 +735,60 @@ ArrayRef<uint8_t> CreateKernel
     /* TypeContextRemapper TypeMapper(Context); */
     /* PointerAddressSpaceUpdater TypeMapper; */
     /* CloneFunctionInto(Dst, Src, VMap, CloneFunctionChangeType::DifferentModule, Returns, "", nullptr, &TypeMapper); */
-    Dst->setCallingConv(CallingConv::C);
+    Dst->setCallingConv(Src->getCallingConv());
     Dst->setLinkage(GlobalValue::InternalLinkage);
 
     if (Src->hasPersonalityFn())
       Dst->setPersonalityFn(MapValue(Src->getPersonalityFn(), VMap));
 
-    // Allow floating-point contraction (i.e. FMA)
+    // Update any per-instruction attributes
     for (auto &BB : *Dst) {
       for (auto &I : BB) {
+        // Allow floating-point contraction (i.e. FMA)
         if (isa<FPMathOperator>(&I)) {
           I.setHasAllowContract(true);
         }
+
+        // Allow function calls to be inlined. This attribute tends to creep in
+        // because we currently need to sprinkle @inline(never) in places to
+        // ensure that all Swift code for the GPU code is present in a single
+        // LLVM module.
+        if (auto CB = dyn_cast<CallBase>(&I)) {
+          CB->removeFnAttr(Attribute::NoInline);
+        }
+      }
+    }
+  }
+
+  // Now that the function bodies have been copied over, update any indirect
+  // calls to point directly to their called functions that were extracted from
+  // the closure environment.
+  for (auto [Src,Dst] : IndirectMap) {
+    if (auto I = dyn_cast<CallBase>(VMap[Src])) {
+      if (auto J = VMap[Dst]) {
+        I->setCalledOperand(J);
       }
     }
   }
 
 #if DEBUG_CLONE_ALL_GLOBALS
   // Copy over any remaining definitions...
-  for (auto &I : SrcModule.aliases()) {
+  for (auto &I : M.aliases()) {
     GlobalAlias* GA = cast<GlobalAlias>(VMap[&I]);
     if (const Constant *C = I.getAliasee())
       GA->setAliasee(MapValue(C, VMap));
   }
 
   // ...indirect functions...
-  for (auto &I : SrcModule.ifuncs()) {
+  for (auto &I : M.ifuncs()) {
     GlobalIFunc *GI = cast<GlobalIFunc>(VMap[&I]);
     if (const Constant *Resolver = I.getResolver())
       GI->setResolver(MapValue(Resolver, VMap));
   }
 
   // ...and named metadata
-  for (auto &I : SrcModule.named_metadata()) {
-    NamedMDNode *NMD = M->getOrInsertNamedMetadata(I.getName());
+  for (auto &I : M.named_metadata()) {
+    NamedMDNode *NMD = K->getOrInsertNamedMetadata(I.getName());
     for (const MDNode *MD : I.operands())
       NMD->addOperand(MapMetadata(MD, VMap));
   }
@@ -763,7 +796,7 @@ ArrayRef<uint8_t> CreateKernel
 
   // Replace swift error handling functions with equivalents that we can call
   // from the device
-  if (Function* _fatalErrorMessage = M->getFunction("$ss18_fatalErrorMessage__4file4line5flagss5NeverOs12StaticStringV_A2HSus6UInt32VtF")) {
+  if (Function* _fatalErrorMessage = K->getFunction("$ss18_fatalErrorMessage__4file4line5flagss5NeverOs12StaticStringV_A2HSus6UInt32VtF")) {
     for (auto U = _fatalErrorMessage->user_begin(), UE = _fatalErrorMessage->user_end(); U != UE; ) {
       Value* V = *U++;
 
@@ -776,12 +809,12 @@ ArrayRef<uint8_t> CreateKernel
         auto File    = getGlobalInitializerString(CI->getArgOperand(6));
         auto Line    = cast<ConstantInt>(CI->getArgOperand(9))->getZExtValue();
 
-        auto __assertfail = M->getFunction("__assertfail");
+        auto __assertfail = K->getFunction("__assertfail");
         CallInst* CINew = CallInst::Create(__assertfail->getFunctionType(), __assertfail,
-            { newStaticString(Context, *M, Prefix->str() + (Message ? ": " + Message->str() : ""))
-            , newStaticString(Context, *M, File->str())
+            { newStaticString(Context, *K, Prefix->str() + (Message ? ": " + Message->str() : ""))
+            , newStaticString(Context, *K, File->str())
             , ConstantInt::get(IntegerType::getInt32Ty(Context), Line)
-            , newStaticString(Context, *M, demangleSymbolAsString(CI->getCaller()->getName(), swift::Demangle::DemangleOptions()))
+            , newStaticString(Context, *K, demangleSymbolAsString(CI->getCaller()->getName(), swift::Demangle::DemangleOptions()))
             , ConstantInt::get(IntegerType::getInt64Ty(Context), 1)
             });
 
@@ -790,86 +823,20 @@ ArrayRef<uint8_t> CreateKernel
     }
   }
 
-  // Determine the position in the closure environment and corresponding handler
-  // for any objects that need their functionality lifted outside of the kernel.
-  for (auto U : isUniquelyReferenced->users()) {
-    LoadInst* Arg = cast<LoadInst>(cast<CallBase>(U)->getOperand(0));
-    uint64_t Index0, Index1;
-
-    // Interrogate the partial-apply forwarder to determine the position in the
-    // closure environment that this argument was loaded from.
-    if (auto I = dyn_cast<Argument>(Arg->getPointerOperand())) {
-      CallBase* CB = cast<CallBase>(I->getParent()->getUniqueUndroppableUser());
-      LoadInst* L  = cast<LoadInst>(CB->getOperand(I->getArgNo()));
-      GetElementPtrInst* GEP = cast<GetElementPtrInst>(L->getPointerOperand());
-
-      assert(2 == GEP->getNumIndices());
-      Index0 = cast<ConstantInt>(GEP->getOperand(1))->getZExtValue();
-      Index1 = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
-    }
-
-    // Locate the copy-on-write handler for this argument
-    for (auto U : Arg->users()) {
-      if (auto I = dyn_cast<CallInst>(U)) {
-        // We should encounter only two function calls, the
-        // isUniquelyReferenced() call that led us here...
-        if (I->getCalledFunction() == isUniquelyReferenced) {
-          continue;
-        }
-
-        // ... and the copy-on-write handler. Create and return a closure that
-        // that will apply the CoW handler to the given operand, once we have
-        // it. We need to do a bit of work first to ensure that the returned
-        // closure only captures values from the source module, not the
-        // currently-under-construction kernel module.
-        unsigned InsertAt = 0;
-        CallInst::TailCallKind TCK = I->getTailCallKind();
-        Function* F = SrcModule.getFunction(I->getCalledFunction()->getName());
-        std::vector<Value *> Params(I->arg_size());
-
-        for (unsigned i = 0; i < I->arg_size(); ++i) {
-          auto A = I->getArgOperand(i);
-          if (Arg == A) {
-            InsertAt = i;
-          }
-          else if (isa<GlobalValue>(A)) {
-            Params[i] = SrcModule.getNamedValue(A->getName());
-          } else {
-            LLVM_DEBUG(dbgs() << "Unhandled argument when capturing CoW handler\n");
-          }
-        }
-
-        auto Handler = [=](Value* Operand, Instruction* InsertBefore) mutable -> Instruction* {
-          Params[InsertAt] = Operand;
-          CallInst* CI = CallInst::Create(F->getFunctionType(), F, Params, "", InsertBefore);
-          CI->setTailCallKind(TCK);
-          return CI;
-        };
-
-        ToCoW.insert({{Index0, Index1}, Handler});
-        break;
-      }
-    }
-  }
-
   // Strip debug information from device code. This may be necessary on some
   // combinations of Swift/CUDA due to bugs in LLVM. Debug information will only
   // be present if already enabled as part of the swift compilation pipeline
   // (default), it will not be generated as part of this plugin.
-  if (StripDebugInfo) {
-    llvm::StripDebugInfo(*M);
-  }
+  if (StripDebugInfo)
+    llvm::StripDebugInfo(*K);
 
   // Update the kernel function to call the main (entry) function from the set
   // that we extracted in the previous step.
-  //
-  // XXX: We really should do a lot of simplification and beta reduction here,
-  // to e.g. remove generic type parameters.
-  Function *Body = M->getFunction("body");
+  Function *Body = K->getFunction("body");
   assert(Body->hasOneUser() && "expected only one call to the kernel body");
   assert(isa<CallInst>(Body->getUniqueUndroppableUser()));
   CallInst *CI = cast<CallInst>(Body->getUniqueUndroppableUser());
-  CI->setCalledOperand(M->getFunction(Main));
+  CI->setCalledOperand(K->getFunction(Main));
 
   // Create a target machine
   std::string Error;
@@ -880,7 +847,7 @@ ArrayRef<uint8_t> CreateKernel
   }
   TargetOptions opt;
   TargetMachine* TargetMachine = Target->createTargetMachine(TargetTriple, TargetGPU, TargetFeatures, opt, Reloc::PIC_);
-  M->setDataLayout(TargetMachine->createDataLayout());
+  K->setDataLayout(TargetMachine->createDataLayout());
 
   // Run a full optimisation pass on this module
   LoopAnalysisManager LAM;
@@ -898,7 +865,8 @@ ArrayRef<uint8_t> CreateKernel
   // This corresponds to the typical -O3 optimization pipeline
   ModulePassManager PM = PB.buildPerModuleDefaultPipeline(OptimizationLevel::O3);
   PM.addPass(VerifierPass());
-  PM.run(*M, MAM);
+
+  PM.run(*K, MAM);
 
   // Generate target assembly. Being a backend/code generation pass, this
   // uses the legacy pass manager so does not integrate with the above.
@@ -908,7 +876,7 @@ ArrayRef<uint8_t> CreateKernel
   if (TargetMachine->addPassesToEmitFile(legacy, ostream, nullptr, CGFT_AssemblyFile)) {
     report_fatal_error("could not create output stream", false);
   }
-  legacy.run(*M);
+  legacy.run(*K);
 
   // Compile the target assembly to object code. This calls out to ptxas to do
   // the work, piping the data in and out via pipes and thus avoiding the
@@ -931,7 +899,7 @@ ArrayRef<uint8_t> CreateKernel
     ModulePassManager PM;
     auto src_out = raw_fd_ostream(src_fd, true);
     PM.addPass(PrintModulePass(src_out));
-    PM.run(*M, MAM);
+    PM.run(*K, MAM);
     src_out.close();
     errs() << src_path << "\n";
 
@@ -959,12 +927,203 @@ ArrayRef<uint8_t> CreateKernel
   return Obj;
 }
 
+const GetElementPtrInst* getClosureIndexOf(const Value* V)
+{
+  if (auto I = dyn_cast<Argument>(V)) {
+    // This is an indirect call to a function that was passed as an argument to
+    // the parent function of this call instruction. We need to trace up the
+    // call stack and try to determine what the actually called function is. We
+    // are being a bit dodgy and assuming that we just have a single line of
+    // function calls from the base `parallel_for` invocation, but if we pop all
+    // the way back to the calling function of the `parallel_for` and still
+    // haven't found and actual function, then...?
+    if (auto U = I->getParent()->getUniqueUndroppableUser()) {
+      if (auto CB = dyn_cast<CallBase>(U)) {
+        // Don't blow past the call to parallel_for
+        assert(I->getParent() == CB->getCalledOperand());
+        return getClosureIndexOf(CB->getOperand(I->getArgNo()));
+      }
+    }
+  }
+
+  if (auto I = dyn_cast<LoadInst>(V)) {
+    return getClosureIndexOf(I->getPointerOperand());
+  }
+
+  if (auto I = dyn_cast<GetElementPtrInst>(V)) {
+    return I;
+  }
+
+  LLVM_DEBUG(dbgs() << "unhandled argument in getIndirectCalledFunction() downsweep phase: " << *V << "\n");
+  return nullptr;
+}
+
+bool isEquivalentGEP(const GetElementPtrInst* A, const GetElementPtrInst* B)
+{
+  if (A->getNumIndices() != B->getNumIndices())
+    return false;
+
+  for (unsigned i = 1; i < A->getNumOperands(); ++i) {
+    auto a = A->getOperand(i);
+    auto b = B->getOperand(i);
+
+    if (!isa<ConstantInt>(a))
+      return false;
+
+    if (!isa<ConstantInt>(b))
+      return false;
+
+    if (a != b)
+      return false;
+  }
+
+  return true;
+}
+
+Value* getValueStoredAt(const GetElementPtrInst* E, Value* V)
+{
+  if (auto I = dyn_cast<AllocaInst>(V)) {
+    for (auto U : I->users()) {
+      if (!isa<GetElementPtrInst>(U))
+        continue;
+
+      if (auto F = getValueStoredAt(E, U)) {
+        return F;
+      }
+    }
+  }
+
+  if (auto I = dyn_cast<GetElementPtrInst>(V)) {
+    if (isEquivalentGEP(E, I)) {
+      E = nullptr;
+    }
+
+    for (auto U : I->users()) {
+      if (auto F = getValueStoredAt(E, U)) {
+        return F;
+      }
+    }
+  }
+
+  if (auto I = dyn_cast<StoreInst>(V)) {
+    if (E) {
+      // We are still searching for the correct index
+      return getValueStoredAt(E, I->getValueOperand());
+    } else {
+      // We can probably delete the store at this point, since we will probably
+      // be using this value directly now rather than reading it from the
+      // captured closure environment.
+      /* I->eraseFromParent(); */
+      return I->getValueOperand();
+    }
+  }
+
+  return nullptr;
+}
+
+Function* getIndirectCalledFunction(Value* Env, Value* V)
+{
+  if (auto I = getClosureIndexOf(V)) {
+    if (auto F = dyn_cast_if_present<Function>(getValueStoredAt(I, Env))) {
+      return F;
+    }
+  }
+
+  return nullptr;
+}
+
+template <unsigned N>
+void ExtractKernel (
+    LLVMContext& Context,
+    Value* Main,
+    Value* Env,
+    SmallPtrSet<GlobalValue*, N>& GVs,
+    SmallPtrSet<GlobalValue*, N>& DeclOnlyGVs,
+    ValueToValueMapTy& IndirectMap,
+    ValueToValueMapTy& CopyOnWriteMap
+)
+{
+  auto F = cast<Function>(Main);
+  GVs.insert(F);
+
+  // The continuation launched might in turn call other functions. Recursively
+  // record those functions for extraction as well.
+  std::vector<Function *> WorkQueue;
+  WorkQueue.push_back(F);
+
+  while (!WorkQueue.empty()) {
+    F = &*WorkQueue.back();
+    WorkQueue.pop_back();
+
+    for (auto &BB : *F) {
+      for (auto &I : BB) {
+        if (auto *CB = dyn_cast<CallBase>(&I)) {
+          Function* CF = nullptr;
+
+          if (CB->isIndirectCall()) {
+            CF = getIndirectCalledFunction(Env, CB->getCalledOperand());
+            IndirectMap[CB] = CF;
+          } else {
+            CF = CB->getCalledFunction();
+
+            // Inline assembly
+            if (!CF)
+              continue;
+
+            // Find the corresponding copy-on-write handler for this object. We
+            // will lift this functionality out of the kernel and execute it as
+            // part of closure environment preparation. Also don't bother to
+            // copy the handler into the kernel, as it will ultimately be
+            // removed as dead code anyway.
+            //
+            // TODO: At the end of the scope there will (may?) be a now
+            // redundant store instruction in the kernel, which saves the data
+            // pointer again because it may have been updated by the CoW
+            // mechanism. We should remove this.
+            //    ---TLM 2025-02-17
+            if (CF->getName() == "swift_isUniquelyReferenced_nonNull_native") {
+              auto Op = CB->getOperand(0);
+              for (auto U : Op->users()) {
+                if (U == CB)
+                  continue;
+
+                if (auto I = dyn_cast<CallBase>(U)) {
+                  DeclOnlyGVs.insert(I->getCalledFunction());
+                  CopyOnWriteMap[Op] = U;
+                  break;
+                }
+              }
+              continue;
+            }
+
+            // Calls to certain functions from the swift-to-ptx prelude are just
+            // stub implementations, with the actual functionality provided as
+            // part of the kernel skeleton. These are typically functions that
+            // exist only on the GPU, such as warp synchronisation primitives.
+            StringRef stub = stubFunctions.lookup(CF->getName());
+            if (!stub.empty())
+              continue;
+          }
+
+          if (CF) {
+            if (!GVs.contains(CF) && !DeclOnlyGVs.contains(CF)) {
+              GVs.insert(CF);
+              WorkQueue.push_back(CF);
+            }
+          } else {
+            LLVM_DEBUG(dbgs() << "Unhandled function call: " << *CB << "\n");
+          }
+        }
+      }
+    }
+  }
+}
 
 Instruction* ApplyCopyOnWriteHandler (
     LLVMContext& Context,
     Module& M,
-    Value* P,
-    COWHandler Handler,
+    Value* V,
+    Instruction* Handler,
     Instruction* InsertBefore,
     Value* StoreAt=nullptr
 )
@@ -972,122 +1131,108 @@ Instruction* ApplyCopyOnWriteHandler (
     // Add a uniqueness check to determine whether we need to run the
     // copy-on-write handler or not.
     auto F = M.getFunction("swift_isUniquelyReferenced_nonNull_native");
-    auto IsUnique = CallInst::Create(F->getFunctionType(), F, { P }, "", InsertBefore);
+    auto IsUnique = CallInst::Create(F->getFunctionType(), F, { V }, "", InsertBefore);
     IsUnique->setTailCall(true);
 
     // Split the original basic block, inserting an else-branch to run the
     // handler. Optionally also store this updated value at the given location
     // (only in the else branch).
     auto NewBB = SplitBlockAndInsertIfElse(IsUnique, InsertBefore, /* unreachable */ false);
-    auto Q = Handler(P, NewBB);
+    Handler->insertBefore(NewBB);
     if (StoreAt)
-      new StoreInst(Q, StoreAt, NewBB);
+      new StoreInst(Handler, StoreAt, NewBB);
 
     // Tie the branches together...
-    PHINode* PHI = PHINode::Create(P->getType(), 2, "", InsertBefore);
-    PHI->addIncoming(P, IsUnique->getParent());
-    PHI->addIncoming(Q, Q->getParent());
+    PHINode* PHI = PHINode::Create(V->getType(), 2, "", InsertBefore);
+    PHI->addIncoming(V, IsUnique->getParent());
+    PHI->addIncoming(Handler, Handler->getParent());
 
     // ...and replace any uses of the original term with our now safely handled
     // version (only uses which are dominated by it)
     DominatorTree DT(*PHI->getFunction());
-    P->replaceUsesWithIf(PHI, [&](Use &U){
+    V->replaceUsesWithIf(PHI, [&](Use &U){
         return DT.dominates(PHI, U);
         });
 
     return PHI;
 }
 
-// Update the closure environment to include the given copy-on-write handlers
-// that have been identified and pulled out of the kernel body. 
+
 void UpdateClosureEnvironment (
     LLVMContext& Context,
     Module& M,
-    Value* P,
-    SmallDenseMap<COWIndex, COWHandler> COWs
+    Value* Env,
+    ValueToValueMapTy& CopyOnWriteMap
 )
 {
-  if (auto Alloca = dyn_cast<AllocaInst>(P)) {
-    for (auto U : Alloca->users()) {
-      if (auto GEP = dyn_cast<GetElementPtrInst>(U)) {
-        for (auto& [Indices, Handler] : COWs) {
-          if (GEP->getNumIndices() != 2)
-            continue;
+  for (auto [Src,Dst] : CopyOnWriteMap) {
+    if (auto Idx = getClosureIndexOf(Src)) {
+      if (auto V = getValueStoredAt(Idx, Env)) {
+        // This was created in the local scope
+        if (auto A = dyn_cast<AllocaInst>(V)) {
+          for (auto U : A->users()) {
+            if (auto S = dyn_cast<StoreInst>(U)) {
+              if (S->getPointerOperand() != A)
+                continue;
 
-          auto& [Ix0, Ix1] = Indices;
-          ConstantInt* Index0 = dyn_cast<ConstantInt>(GEP->getOperand(1));
-          ConstantInt* Index1 = dyn_cast<ConstantInt>(GEP->getOperand(2));
-
-          if (!Index0 || Index0->getZExtValue() != Ix0)
-            continue;
-
-          if (!Index1 || Index1->getZExtValue() != Ix1)
-            continue;
-
-          // This is the GEP that stores the part of the closure we are
-          // interested in into the closure environment. There are different
-          // cases to handle in how this argument was used, for example whether
-          // the parameter is an argument to the calling function, or was
-          // created in the local scope (e.g. allocating a new empty array).
-          assert(GEP->hasOneUse());
-          StoreInst* S = cast<StoreInst>(GEP->getUniqueUndroppableUser());
-          Value* V = S->getValueOperand();
-
-          // This was created in the local scope
-          if (AllocaInst* A = dyn_cast<AllocaInst>(V)) {
-            for (auto U : A->users()) {
-              if (StoreInst* I = dyn_cast<StoreInst>(U)) {
-                if (I->getPointerOperand() != A)
-                  continue;
-
-                auto Unique = ApplyCopyOnWriteHandler(Context, M, I->getValueOperand(), Handler, I);
-                auto NewI = new StoreInst(Unique, I->getPointerOperand(), I->isVolatile(), I->getAlign());
-
-                ReplaceInstWithInst(I, NewI);
-                break;
+              // Clone the handler function and update the appropriate operand
+              auto T = S->getValueOperand();
+              auto I = cast<Instruction>(Dst)->clone();
+              for (unsigned i = 0; i < I->getNumOperands(); ++i) {
+                if (I->getOperand(i) == Src)
+                  I->setOperand(i, T);
               }
+
+              auto Q = ApplyCopyOnWriteHandler(Context, M, T, I, S);
+              S->setOperand(0, Q);
+              I->dropLocation();  // must be called instruction with parent
+              break;
             }
-            continue;
           }
-
-          // This was given as an argument to the function
-          if (Argument* A = dyn_cast<Argument>(V)) {
-            for (auto U : A->users()) {
-              if (LoadInst* I = dyn_cast<LoadInst>(U)) {
-                auto Unique = ApplyCopyOnWriteHandler(Context, M, I, Handler, I->getNextNonDebugInstruction(), A);
-                auto InsertBefore = Unique->getNextNonDebugInstruction();
-
-                // The load that this function argument is stored in may have
-                // been allocated in non-device-accessible memory by the calling
-                // function (i.e. an alloca). Replace the input argument with a
-                // locally defined alloca and replace subsequent uses of the
-                // input argument with this pointer. The subsequent steps of
-                // closure conversion will translate this into a host memory
-                // (de)allocation that is device accessible.
-                auto NewA = new AllocaInst(I->getPointerOperandType(), I->getPointerAddressSpace(), "", InsertBefore);
-                new StoreInst(Unique, NewA, InsertBefore);
-
-                DominatorTree DT(*Unique->getFunction());
-                A->replaceUsesWithIf(NewA, [&](Use &U){
-                    return DT.dominates(NewA, U);
-                    });
-
-                break;
-              }
-            }
-            continue;
-          }
+          continue;
         }
-      }
 
-      /* Ignore other users */
+        // This was a given as a function parameter
+        if (auto A = dyn_cast<Argument>(V)) {
+          for (auto U : A->users()) {
+            if (auto L = dyn_cast<LoadInst>(U)) {
+              // Clone the handler function and update the appropriate operand
+              auto I = cast<Instruction>(Dst)->clone();
+              for (unsigned i = 0; i < I->getNumOperands(); ++i) {
+                if (I->getOperand(i) == Src)
+                  I->setOperand(i, L);
+              }
+
+              auto Q = ApplyCopyOnWriteHandler(Context, M, L, I, L->getNextNonDebugInstruction(), A);
+              I->dropLocation();
+
+              // The load that this function argument is stored in may have been
+              // allocated in non-device-accessible memory by the calling
+              // function (i.e. an alloca). Replace the input argument with a
+              // locally defined alloca and replace subsequent uses of the input
+              // argument with this pointer. The subsequent steps of closure
+              // conversion will translate this into a host memory
+              // (de)allocation that is device accessible.
+              auto InsertBefore = Q->getNextNonDebugInstruction();
+              auto NewA = new AllocaInst(L->getPointerOperandType(), L->getPointerAddressSpace(), "", InsertBefore);
+              new StoreInst(Q, NewA, InsertBefore);
+
+              // Also replace uses with this new alloca
+              DominatorTree DT(*Q->getFunction());
+              A->replaceUsesWithIf(NewA, [&](Use &U){
+                  return DT.dominates(NewA, U);
+                  });
+              break;
+            }
+          }
+          continue;
+        }
+
+        LLVM_DEBUG(dbgs() << "UpdateClosureEnvironment(copy-on-write): unhandled instruction: " << *V << "\n");
+      }
     }
   }
-  else {
-    LLVM_DEBUG(dbgs() << "UpdateClosureEnvironment(update copy-on-write): unhandled instruction: " << *P << "\n");
-  }
 }
-
 
 // Update the environment so that its contents are accessible from the device.
 // There are a few different cases to handle:
@@ -1171,24 +1316,24 @@ void UpdateClosureEnvironment (
 
     // Determine how to (asynchronously) free the memmory
     // [Free 1]: Check for an llvm.stacksave() instruction
-    if (auto *Prev = dyn_cast<Instruction>(NewI)->getPrevNonDebugInstruction()) {
-      if (CallInst *Save = dyn_cast<CallInst>(Prev)) {
+    if (auto Prev = NewI->getPrevNonDebugInstruction()) {
+      if (auto Save = dyn_cast<CallInst>(Prev)) {
         if (Save->getCalledFunction()->getName() == "llvm.stacksave") {
-          assert(Save->hasOneUser() && "expected llvm.stacksave() to have a single unique undroppable user");
+          // We can have multiple terminating blocks of the function when throwing
+          // functions are involved
+          for (auto U : Save->users()) {
+            if (auto Restore = dyn_cast<CallInst>(U)) {
+              assert(Restore->getCalledFunction()->getName() == "llvm.stackrestore");
 
-          auto *Restore = cast<Instruction>(Save->getUniqueUndroppableUser());
-          assert(cast<CallInst>(Restore)->getCalledFunction()->getName() == "llvm.stackrestore");
-
-          Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
-          CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
-          Free->setCallingConv(CallingConv::Swift);
-          Free->insertAfter(Restore);
+              Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
+              CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
+              Free->setCallingConv(CallingConv::Swift);
+              Free->insertAfter(Restore);
+              ToErase.insert(Restore);
+            }
+          }
+          ToErase.insert(Save);
           ToFree.erase(NewI);
-
-          // Safe to erase these directly since users() will not be iterating
-          // over them. XXX: The order is important here
-          Restore->eraseFromParent();
-          Save->eraseFromParent();
         }
       }
     }
@@ -1294,7 +1439,7 @@ void UpdateClosureEnvironment (
     CUDAContext CUDA,
     CachingHostAllocator Allocator,
     Value* Event,
-    SmallDenseMap<COWIndex, COWHandler> ToCoW
+    ValueToValueMapTy& CopyOnWriteMap
 )
 {
   SmallPtrSet<Instruction*, N> ToErase;
@@ -1302,7 +1447,7 @@ void UpdateClosureEnvironment (
   Function *Parent = cast<Instruction>(Env)->getFunction();
 
   // Lift any copy-on-write handlers out of the kernel body
-  UpdateClosureEnvironment(Context, M, Env, ToCoW);
+  UpdateClosureEnvironment(Context, M, Env, CopyOnWriteMap);
 
   // Recursively marshal the closure environment to device-accessible memory
   UpdateClosureEnvironment(Context, M, Body, Env, CUDA, Allocator, Event, ToErase, ToFree);
@@ -1365,93 +1510,95 @@ void UpdateClosureEnvironment (
   // the allocator
   //
   DominatorTree DT(*Parent);
-  if (isa<Instruction>(get<0>(CUDA)) || isa<Instruction>(get<0>(Allocator))) {
-    Instruction* Lowest = nullptr;
-    Instruction* Highest = nullptr;
-    Instruction* Release0 = nullptr;
-    Instruction* Release1 = nullptr;
-    Instruction* Release2 = nullptr;
+  auto [CUDA0, CUDA1, CUDA2] = CUDA;
+  auto [Allocator0, Allocator1, Allocator2] = Allocator;
 
-    // Locate the pre- and post-dominating instructions
-    for (auto *U : get<0>(Allocator)->users()) {
-      if (Instruction* I = dyn_cast<Instruction>(U)) {
-        if (CallInst* CI = dyn_cast<CallInst>(I)) {
-          if (CI->getCalledFunction()->getName() == "swift_release") {
-            assert(!Release0 && "expected a single call to swift_release");
-            Release0 = I;
-            Release1 = Release0->getPrevNonDebugInstruction();
-            Release2 = Release1->getPrevNonDebugInstruction();
-            assert(cast<CallInst>(Release1)->getCalledFunction()->getName() == "swift_release");
-            assert(cast<CallInst>(Release2)->getCalledFunction()->getName() == "swift_release");
-            continue;
+  if (isa<Instruction>(CUDA0) || isa<Instruction>(Allocator0)) {
+    Instruction* Highest = nullptr;
+
+    // Locate the pre-dominating instruction
+    for (auto U : Allocator0->users()) {
+      if (auto I = dyn_cast<Instruction>(U)) {
+        if (!Highest || !DT.dominates(Highest, I)) {
+          Highest = I;
+        }
+      }
+    }
+
+    // Now move the context...
+    if (auto I = dyn_cast<Instruction>(CUDA0)) {
+      if (auto E = dyn_cast<ExtractValueInst>(I)) {
+        if (auto I = dyn_cast<Instruction>(E->getAggregateOperand())) {
+          I->moveBefore(Highest);
+        }
+      }
+      I->moveBefore(Highest);
+      cast<Instruction>(CUDA1)->moveBefore(Highest);
+      cast<Instruction>(CUDA2)->moveBefore(Highest);
+    }
+
+    // ...and/or allocator initialiser ahead of the dominating instruction
+    if (auto I = dyn_cast<Instruction>(Allocator0)) {
+      if (auto E = dyn_cast<ExtractValueInst>(I)) {
+        if (auto I = dyn_cast<Instruction>(E->getAggregateOperand())) {
+          I->moveBefore(Highest);
+        }
+      }
+      I->moveBefore(Highest);
+      cast<Instruction>(Allocator1)->moveBefore(Highest);
+      cast<Instruction>(Allocator2)->moveBefore(Highest);
+    }
+
+    // Now, we need to determine when the allocator can be released. For
+    // throwing functions there may not be a single dominating terminator block,
+    // so we need to do it along every pathway
+    for (auto U : Allocator0->users()) {
+      if (auto I = dyn_cast<CallInst>(U)) {
+        if (I->getCalledFunction()->getName() == "swift_release") {
+          // Now locate the lowest user where this instruction dominates it
+          Instruction* Lowest = nullptr;
+          Instruction* Release0 = I;
+          Instruction* Release1 = Release0->getPrevNonDebugInstruction();
+          Instruction* Release2 = Release1->getPrevNonDebugInstruction();
+          assert(cast<CallInst>(Release1)->getCalledFunction()->getName() == "swift_release");
+          assert(cast<CallInst>(Release2)->getCalledFunction()->getName() == "swift_release");
+
+          for (auto U2 : Allocator0->users()) {
+            if (auto I2 = dyn_cast<Instruction>(U2)) {
+              if (I == I2)
+                continue;
+
+              if (DT.dominates(I, I2)) {
+                if (!Lowest || DT.dominates(Lowest, I2)) {
+                  Lowest = I2;
+                }
+              }
+            }
+          }
+
+          if (Lowest) {
+            Release0->moveAfter(Lowest);
+            Release1->moveAfter(Lowest);
+            Release2->moveAfter(Lowest);
           }
         }
-
-        if (!Highest) {
-          Lowest = Highest = I;
-          continue;
-        }
-
-        if (!DT.dominates(Highest, I)) {
-          Highest = I;
-          continue;
-        }
-
-        if (DT.dominates(Lowest, I)) {
-          Lowest = I;
-          continue;
-        }
       }
-    }
-
-    // Move context and allocator (de)initialisers
-    if (Instruction *I = dyn_cast<Instruction>(get<0>(CUDA))) {
-      if (ExtractValueInst *EV = dyn_cast<ExtractValueInst>(I)) {
-        if (Instruction *I0 = dyn_cast<Instruction>(EV->getAggregateOperand())) {
-          I0->moveBefore(Highest);
-        }
-      }
-      I->moveBefore(Highest);
-      cast<Instruction>(get<1>(CUDA))->moveBefore(Highest);
-      cast<Instruction>(get<2>(CUDA))->moveBefore(Highest);
-    }
-
-    if (Instruction *I = dyn_cast<Instruction>(get<0>(Allocator))) {
-      if (ExtractValueInst *EV = dyn_cast<ExtractValueInst>(I)) {
-        if (Instruction *I0 = dyn_cast<Instruction>(EV->getAggregateOperand())) {
-          I0->moveBefore(Highest);
-        }
-      }
-      I->moveBefore(Highest);
-      cast<Instruction>(get<1>(Allocator))->moveBefore(Highest);
-      cast<Instruction>(get<2>(Allocator))->moveBefore(Highest);
-    }
-
-    if (Release0) {
-      Release0->moveAfter(Lowest);
-      Release1->moveAfter(Lowest);
-      Release2->moveAfter(Lowest);
     }
   }
 
   // Also ensure we don't swift_release the ready event too early
   Instruction* Lowest = nullptr;
   Instruction* Release = nullptr;
-  for (auto *U : Event->users()) {
-    if (Instruction* I = dyn_cast<Instruction>(U)) {
-      if (CallInst* CI = dyn_cast<CallInst>(I)) {
+  for (auto U : Event->users()) {
+    if (auto I = dyn_cast<Instruction>(U)) {
+      if (auto CI = dyn_cast<CallInst>(I)) {
         if (CI->getCalledFunction()->getName() == "swift_release") {
           Release = I;
           continue;
         }
       }
 
-      if (!Lowest) {
-        Lowest = I;
-        continue;
-      }
-
-      if (DT.dominates(Lowest, I)) {
+      if (!Lowest || DT.dominates(Lowest, I)) {
         Lowest = I;
       }
     }
@@ -1470,7 +1617,7 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
   LLVMContext &Context = M.getContext();
 
   // Find all use sites of the `parallel_for` function.
-  Function* Fseq = M.getFunction("$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventCSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySiXEtF");
+  Function* Fseq = M.getFunction("$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventCSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySixYKXEtxYKs5ErrorRzlF");
   if (!Fseq) {
     LLVM_DEBUG(dbgs() << "No uses of function `SwiftToPTX.parallel_for()` found in this module\n");
     return PreservedAnalyses::all();
@@ -1491,7 +1638,7 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
   // a parallel GPU kernel. First, add all the necessary host-side support code.
   LinkInHostSupportCode(M, Context);
 
-  Function* Fpar = M.getFunction("$s10SwiftToPTX19launch_parallel_for10iterations6kernel3env7context6streamAA5EventCSi_AA17ParallelForKernelVzSvAA7ContextVAA6StreamVtF");
+  Function* Fpar = M.getFunction("$s10SwiftToPTX19launch_parallel_for10iterations7context6stream6kernel3env10swifterror11thrownerrorAA5EventCSi_AA7ContextVAA6StreamVAA17ParallelForKernelVzS3vtF");
   StructType* kernel_t = StructType::getTypeByName(Context, "T10SwiftToPTX17ParallelForKernelV");
 
   // Iterate over all uses of the `parallel_for(iterations: body:)` function
@@ -1511,39 +1658,25 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
       Value* Stream = CI->getArgOperand(7);
       Value* Body = CI->getArgOperand(8);
       Value* Env = CI->getArgOperand(9);
+      /* Value* TypeMetadata = CI->getArgOperand(10); */
+      /* Value* ProtocolWitnessTable = CI->getArgOperand(11); */
+      /* Value* SwiftSelf = CI->getArgOperand(12); */
+      /* Value* SwiftError = CI->getArgOperand(13); */
+      Value* ThrownError = CI->getArgOperand(14);
 
-      // The function we are interested in lifting as the body of a parallel loop
+      // Extract the set of global functions that this kernel consists of. Also
+      // keep track of indirect functions that need to be specialised at the
+      // call site, as well as copy-on-write handlers that will be lifted out of
+      // the kernel into the closure environment setup phase.
       SmallPtrSet<GlobalValue*, 16> GVs;
-      auto F = cast<Function>(Body);
-      GVs.insert(F);
-
-      // The continuation launched might in turn call other functions.
-      // Recursively record those functions for extraction as well.
-      std::vector<Function *> WorkQueue;
-      WorkQueue.push_back(F);
-
-      while (!WorkQueue.empty()) {
-        F = &*WorkQueue.back();
-        WorkQueue.pop_back();
-
-        for (auto &BB : *F) {
-          for (auto &I : BB) {
-            if (auto *CB = dyn_cast<CallBase>(&I)) {
-              if (auto *CF = CB->getCalledFunction()) {
-                if (!GVs.contains(CF)) {
-                  GVs.insert(CF);
-                  WorkQueue.push_back(CF);
-                }
-              }
-            }
-          }
-        }
-      }
+      SmallPtrSet<GlobalValue*, 16> DeclOnlyGVs;
+      ValueToValueMapTy IndirectMap;
+      ValueToValueMapTy CopyOnWriteMap;
+      ExtractKernel(Context, Body, Env, GVs, DeclOnlyGVs, IndirectMap, CopyOnWriteMap);
 
       // Generate PTX assembly for the (set of) functions called by the
       // `parallel_for` launcher, and embed the generated code into the module
-      SmallDenseMap<COWIndex, COWHandler> ToCoW;
-      ArrayRef<uint8_t> Obj = CreateKernel(Context, M, Body->getName(), GVs, ToCoW);
+      ArrayRef<uint8_t> Obj = CreateKernel(Context, M, Body->getName(), GVs, DeclOnlyGVs, IndirectMap);
       size_t buffer_size = Obj.size();
       IntegerType* i8_t = IntegerType::getInt8Ty(Context);
       ArrayType* image_t = ArrayType::get(i8_t, buffer_size);
@@ -1569,18 +1702,43 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
       Kernel->setAlignment(Align(8));
       Kernel->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
 
+      // Create temporary placeholders for the swifterror and throwerror terms
+      // that can be passed to the GPU kernel. These will need to be
+      // synchronised with the "real" swift error terms once the kernel
+      // completes, but most likely we'll have to wait until we have this marked
+      // as an 'async throws' function until that will work correctly.
+      IntegerType *i64_t = IntegerType::getInt64Ty(Context);
+      PointerType *ptr_t = PointerType::get(Context, 0);
+      ConstantInt *size = ConstantInt::get(i64_t, M.getDataLayout().getTypeAllocSize(ptr_t).getFixedValue());
+      Function *Alloc = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF");
+      CallInst *KernelError = CallInst::Create(Alloc->getFunctionType(), Alloc, {size, Allocator0, Allocator1, Allocator2});
+      KernelError->setCallingConv(CallingConv::Swift);
+      KernelError->insertBefore(CI);
+      new StoreInst(ConstantPointerNull::get(ptr_t), KernelError, CI);
+
       // Update the calling instruction to our placeholder `parallel_for` to our
       // kernel launcher. This assumes that the environment is set up correctly,
       // which we will do in the next step.
-      std::vector<Value*> params = {Iterations, Kernel, Env, Context0, Context1, Context2, Stream};
+      std::vector<Value*> params = {Iterations, Context0, Context1, Context2, Stream, Kernel, Env, KernelError, ThrownError};
       CallInst* CIpar = CallInst::Create(Fpar->getFunctionType(), Fpar, params);
       CIpar->setCallingConv(CallingConv::Swift);
-      CIpar->addParamAttr(1, Attribute::NonNull);
-      CIpar->addParamAttr(2, Attribute::NonNull);
+      CIpar->addParamAttr(5, Attribute::NonNull);
+      CIpar->addParamAttr(5, Attribute::NoCapture);
+      CIpar->addParamAttr(5, Attribute::getWithDereferenceableBytes(Context, 32));
+      CIpar->addParamAttr(7, Attribute::NoAlias);
+      CIpar->addParamAttr(7, Attribute::NoCapture);
+      /* CIpar->addParamAttr(7, Attribute::SwiftError); */
+      CIpar->addParamAttr(7, Attribute::getWithDereferenceableBytes(Context, 8));
       ReplaceInstWithInst(CI, CIpar);
 
+      // Free the temporary swifterror term passed to the kernel. See above TODO
+      Function *Free = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
+      CallInst *FreeI = CallInst::Create(Free->getFunctionType(), Free, {KernelError, CIpar, Allocator0, Allocator1, Allocator2});
+      FreeI->setCallingConv(CallingConv::Swift);
+      FreeI->insertAfter(CIpar);
+
       // Update the closure environment so that its contents are accessible from the device
-      UpdateClosureEnvironment(Context, M, Body, Env, { Context0, Context1, Context2 }, { Allocator0, Allocator1, Allocator2 }, CIpar, ToCoW);
+      UpdateClosureEnvironment(Context, M, Body, Env, { Context0, Context1, Context2 }, { Allocator0, Allocator1, Allocator2 }, CIpar, CopyOnWriteMap);
     }
   }
 
