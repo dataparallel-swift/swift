@@ -347,7 +347,7 @@ std::unique_ptr<Module> LoadLibdeviceModule(SMDiagnostic &Err, LLVMContext &Cont
   auto FilePath = LocateLibdeviceFile();
   auto FileOrError = MemoryBuffer::getFile(FilePath);
   if (std::error_code EC = FileOrError.getError()) {
-    report_fatal_error("Could not open libdevice module", false);
+    report_fatal_error("could not open libdevice module", false);
   }
   MemoryBufferRef Buffer = MemoryBufferRef(*std::move(FileOrError.get()));
   auto ModuleOrError = parseBitcodeFile(Buffer, Context);
@@ -500,7 +500,7 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
       , nullptr
       };
     execv(PTXASPath.data(), const_cast<char* const*>(argv));
-    report_fatal_error("execv() failed", false);
+    report_fatal_error("execv() failed (" + Twine(errno) + ")", false);
   }
   else {
     // PARENT PROCESS
@@ -891,7 +891,7 @@ ArrayRef<uint8_t> CreateKernel
     int src_fd = 0;
     SmallVector<char> src_path;
     if (sys::fs::createTemporaryFile("kernel", "ll", src_fd, src_path)) {
-      report_fatal_error("Failed to create output file", false);
+      report_fatal_error("failed to create output file", false);
     }
     // XXX: Note that we need to dump the generated IR from a _different_
     // pass manager, otherwise generating target assembly with the old pass
@@ -906,7 +906,7 @@ ArrayRef<uint8_t> CreateKernel
     int ptx_fd = 0;
     SmallVector<char> ptx_path;
     if (sys::fs::createTemporaryFile("kernel", "ptx", ptx_fd, ptx_path)) {
-      report_fatal_error("Failed to create output file", false);
+      report_fatal_error("failed to create output file", false);
     }
     auto ptx_out = raw_fd_ostream(ptx_fd, true);
     ptx_out << Asm;
@@ -916,7 +916,7 @@ ArrayRef<uint8_t> CreateKernel
     int obj_fd = 0;
     SmallVector<char> obj_path;
     if (sys::fs::createTemporaryFile("kernel", "o", obj_fd, obj_path)) {
-      report_fatal_error("Failed to create output file", false);
+      report_fatal_error("failed to create output file", false);
     }
     auto obj_out = raw_fd_ostream(obj_fd, true);
     obj_out.write((const char*) Obj.data(), Obj.size());
@@ -954,7 +954,7 @@ const GetElementPtrInst* getClosureIndexOf(const Value* V)
     return I;
   }
 
-  LLVM_DEBUG(dbgs() << "unhandled argument in getIndirectCalledFunction() downsweep phase: " << *V << "\n");
+  LLVM_DEBUG(dbgs() << "unhandled argument in getClosureIndexOf() downsweep phase: " << *V << "\n");
   return nullptr;
 }
 
@@ -1062,6 +1062,8 @@ void ExtractKernel (
 
           if (CB->isIndirectCall()) {
             CF = getIndirectCalledFunction(Env, CB->getCalledOperand());
+            if (!CF)
+              report_fatal_error("swift-to-ptx: could not specialise indirect function call", false);
             IndirectMap[CB] = CF;
           } else {
             CF = CB->getCalledFunction();
