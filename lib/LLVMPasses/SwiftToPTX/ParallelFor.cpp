@@ -963,6 +963,9 @@ bool isEquivalentGEP(const GetElementPtrInst* A, const GetElementPtrInst* B)
   if (A->getNumIndices() != B->getNumIndices())
     return false;
 
+  if (A->getSourceElementType() != B->getSourceElementType())
+    return false;
+
   for (unsigned i = 1; i < A->getNumOperands(); ++i) {
     auto a = A->getOperand(i);
     auto b = B->getOperand(i);
@@ -1021,6 +1024,22 @@ Value* getValueStoredAt(const GetElementPtrInst* E, Value* V)
   return nullptr;
 }
 
+// XXX: This currently (mostly) works but is not quite right. Instead of
+// recurring through the given environment parameter (the environment captured
+// by the `parallel_for` invocation), we should instead recover what is exactly
+// the environment that is passed to the partial apply forwarder. Recovering the
+// value stored at the given GEP index should then not require recurring through
+// the environment, it should be found at the "top level", so to speak.
+// Currently we dig down from the top of the environment passed to the
+// `parallel_for` looking for the right index, but we actually rely on the type
+// of the GEP operand to help us locate the right one. This is surely going to
+// not work forever...
+//
+// Furthermore, this will be required once we support more functionality and
+// want to specialise functions that themselves call `parallel_for` with a
+// captured closure parameter.
+//     --- TLM 2025-03-21
+//
 Function* getIndirectCalledFunction(Value* Env, Value* V)
 {
   if (auto I = getClosureIndexOf(V)) {
