@@ -432,7 +432,7 @@ void LinkInHostSupportCode(Module &M, LLVMContext &Context)
       DstI->setName(I.getName());
       VMap[&I] = &*DstI++;
     }
-    SmallVector<ReturnInst *, 8> Returns;
+    SmallVector<ReturnInst *> Returns;
     CloneFunctionInto(Dst, &Src, VMap, CloneFunctionChangeType::DifferentModule, Returns);
   }
 }
@@ -607,14 +607,13 @@ GlobalValue* newStaticString(LLVMContext& Context, Module& Module, std::string S
 // we cleanly separate this we should be able to compile multiple units
 // concurrently, which could be useful.
 //
-template <unsigned N>
 ArrayRef<uint8_t> CreateKernel
 (
     LLVMContext& Context,
     Module& M,
     StringRef Main,
-    SmallPtrSet<GlobalValue*, N> GVs,
-    SmallPtrSet<GlobalValue*, N> DeclOnlyGVs,
+    SmallPtrSetImpl<GlobalValue*>& GVs,
+    SmallPtrSetImpl<GlobalValue*>& DeclOnlyGVs,
     ValueToValueMapTy& IndirectMap
 )
 {
@@ -703,7 +702,7 @@ ArrayRef<uint8_t> CreateKernel
     if (!GV)
       continue;
 
-    SmallVector<std::pair<unsigned, MDNode*>, 1> MDs;
+    SmallVector<std::pair<unsigned, MDNode*>> MDs;
     I.getAllMetadata(MDs);
     for (auto MD : MDs)
       GV->addMetadata(MD.first, *MapMetadata(MD.second, VMap));
@@ -730,7 +729,7 @@ ArrayRef<uint8_t> CreateKernel
       DstI->setName(I.getName());
       VMap[&I] = &*DstI++;
     }
-    SmallVector<ReturnInst *, 8> Returns;
+    SmallVector<ReturnInst *> Returns;
     CloneFunctionInto(Dst, Src, VMap, CloneFunctionChangeType::DifferentModule, Returns);
     /* TypeContextRemapper TypeMapper(Context); */
     /* PointerAddressSpaceUpdater TypeMapper; */
@@ -1051,13 +1050,12 @@ Function* getIndirectCalledFunction(Value* Env, Value* V)
   return nullptr;
 }
 
-template <unsigned N>
 void ExtractKernel (
     LLVMContext& Context,
     Value* Main,
     Value* Env,
-    SmallPtrSet<GlobalValue*, N>& GVs,
-    SmallPtrSet<GlobalValue*, N>& DeclOnlyGVs,
+    SmallPtrSetImpl<GlobalValue*>& GVs,
+    SmallPtrSetImpl<GlobalValue*>& DeclOnlyGVs,
     ValueToValueMapTy& IndirectMap,
     ValueToValueMapTy& CopyOnWriteMap
 )
@@ -1281,7 +1279,6 @@ void UpdateClosureEnvironment (
 // of indirection. XXX: Check this, it may have more structure than this,
 // especially now that we don't need to do address rewriting.
 //
-template <unsigned N>
 void UpdateClosureEnvironment (
     LLVMContext& Context,
     Module& M,
@@ -1290,8 +1287,8 @@ void UpdateClosureEnvironment (
     CUDAContext CUDA,
     CachingHostAllocator Allocator,
     Value* Event,
-    SmallPtrSet<Instruction*, N>& ToErase,
-    SmallPtrSet<Value*, N>& ToFree
+    SmallPtrSetImpl<Instruction*>& ToErase,
+    SmallPtrSetImpl<Value*>& ToFree
 )
 {
   /* std::string dots(depth, '.'); */
@@ -1451,7 +1448,6 @@ void UpdateClosureEnvironment (
 // setup and finalisation. The other overload of this function is the recursive
 // one that does all the hard work.
 //
-template <unsigned N=16>
 void UpdateClosureEnvironment (
     LLVMContext& Context,
     Module& M,
@@ -1463,8 +1459,8 @@ void UpdateClosureEnvironment (
     ValueToValueMapTy& CopyOnWriteMap
 )
 {
-  SmallPtrSet<Instruction*, N> ToErase;
-  SmallPtrSet<Value*, N> ToFree;
+  SmallPtrSet<Instruction*, 8> ToErase;
+  SmallPtrSet<Value*, 8> ToFree;
   Function *Parent = cast<Instruction>(Env)->getFunction();
 
   // Lift any copy-on-write handlers out of the kernel body
