@@ -926,36 +926,14 @@ ArrayRef<uint8_t> CreateKernel
   return Obj;
 }
 
-const GetElementPtrInst* getClosureIndexOf(const Value* V)
-{
-  if (auto I = dyn_cast<Argument>(V)) {
-    // This is an indirect call to a function that was passed as an argument to
-    // the parent function of this call instruction. We need to trace up the
-    // call stack and try to determine what the actually called function is. We
-    // are being a bit dodgy and assuming that we just have a single line of
-    // function calls from the base `parallel_for` invocation, but if we pop all
-    // the way back to the calling function of the `parallel_for` and still
-    // haven't found and actual function, then...?
-    if (auto U = I->getParent()->getUniqueUndroppableUser()) {
-      if (auto CB = dyn_cast<CallBase>(U)) {
-        // Don't blow past the call to parallel_for
-        assert(I->getParent() == CB->getCalledOperand());
-        return getClosureIndexOf(CB->getOperand(I->getArgNo()));
-      }
-    }
-  }
-
-  if (auto I = dyn_cast<LoadInst>(V)) {
-    return getClosureIndexOf(I->getPointerOperand());
-  }
-
-  if (auto I = dyn_cast<GetElementPtrInst>(V)) {
-    return I;
-  }
-
-  LLVM_DEBUG(dbgs() << "unhandled argument in getClosureIndexOf() downsweep phase: " << *V << "\n");
-  return nullptr;
-}
+// XXX: This is a bit lazy; we could encode this on the actual call stack as an
+// intrusive linked list by transforming ExtractKernel into a recursive
+// function, and avoid the overhead of allocating/copying this vector.
+// However, SmallVector should avoid the allocation for small N by storing the
+// values in the object itself, so in practice it may not be necessary. We need
+// to benchmark this, and test how deep the call stack is in practice.
+//    --- TLM 2025-03-24
+typedef SmallVector<CallBase*> CallStack;
 
 bool isEquivalentGEP(const GetElementPtrInst* A, const GetElementPtrInst* B)
 {
@@ -1023,10 +1001,10 @@ Value* getValueStoredAt(const GetElementPtrInst* E, Value* V)
   return nullptr;
 }
 
-// XXX: This currently (mostly) works but is not quite right. Instead of
-// recurring through the given environment parameter (the environment captured
-// by the `parallel_for` invocation), we should instead recover what is exactly
-// the environment that is passed to the partial apply forwarder. Recovering the
+// XXX: This mostly works but is not quite right. Instead of recurring through
+// the given environment parameter (the environment captured by the
+// `parallel_for` invocation), we should instead recover what is exactly the
+// environment that is passed to the partial apply forwarder. Recovering the
 // value stored at the given GEP index should then not require recurring through
 // the environment, it should be found at the "top level", so to speak.
 // Currently we dig down from the top of the environment passed to the
@@ -1039,12 +1017,33 @@ Value* getValueStoredAt(const GetElementPtrInst* E, Value* V)
 // captured closure parameter.
 //     --- TLM 2025-03-21
 //
-Function* getIndirectCalledFunction(Value* Env, Value* V)
+Value* getValueFromClosureEnvironment(CallStack CS, Value* Env, Value* V)
 {
-  if (auto I = getClosureIndexOf(V)) {
-    if (auto F = dyn_cast_if_present<Function>(getValueStoredAt(I, Env))) {
-      return F;
-    }
+
+  if (auto I = dyn_cast<Argument>(V)) {
+    // This is an argument to a (indirect) function call. Trace up the call
+    // stack and examine the calling function.
+    auto CB = CS.back();
+    CS.pop_back();
+
+    // If we pop all the way back and still haven't found anything, we'll be
+    // poking the `parallel_for` call, so the argument index at the callee
+    // won't match...
+    assert(!CS.empty());
+
+    return getValueFromClosureEnvironment(CS, Env, CB->getOperand(I->getArgNo()));
+  }
+
+  if (auto I = dyn_cast<GlobalValue>(V)) {
+    return I;
+  }
+
+  if (auto I = dyn_cast<LoadInst>(V)) {
+    return getValueFromClosureEnvironment(CS, Env, I->getPointerOperand());
+  }
+
+  if (auto I = dyn_cast<GetElementPtrInst>(V)) {
+    return getValueStoredAt(I, Env);
   }
 
   return nullptr;
@@ -1052,6 +1051,7 @@ Function* getIndirectCalledFunction(Value* Env, Value* V)
 
 void ExtractKernel (
     LLVMContext& Context,
+    CallBase* Root,
     Value* Main,
     Value* Env,
     SmallPtrSetImpl<GlobalValue*>& GVs,
@@ -1060,16 +1060,16 @@ void ExtractKernel (
     ValueToValueMapTy& CopyOnWriteMap
 )
 {
-  auto F = cast<Function>(Main);
+  auto* F = cast<Function>(Main);
   GVs.insert(F);
 
   // The continuation launched might in turn call other functions. Recursively
   // record those functions for extraction as well.
-  std::vector<Function *> WorkQueue;
-  WorkQueue.push_back(F);
+  std::vector<std::pair<CallStack, Function *>> WorkQueue;
+  WorkQueue.push_back({{Root}, F});
 
   while (!WorkQueue.empty()) {
-    F = &*WorkQueue.back();
+    auto [CS, F] = WorkQueue.back();
     WorkQueue.pop_back();
 
     for (auto &BB : *F) {
@@ -1078,9 +1078,11 @@ void ExtractKernel (
           Function* CF = nullptr;
 
           if (CB->isIndirectCall()) {
-            CF = getIndirectCalledFunction(Env, CB->getCalledOperand());
+            CF = dyn_cast_if_present<Function>(getValueFromClosureEnvironment(CS, Env, CB->getCalledOperand()));
+
             if (!CF)
               report_fatal_error("swift-to-ptx: could not specialise indirect function call", false);
+
             IndirectMap[CB] = CF;
           } else {
             CF = CB->getCalledFunction();
@@ -1108,7 +1110,35 @@ void ExtractKernel (
 
                 if (auto I = dyn_cast<CallBase>(U)) {
                   DeclOnlyGVs.insert(I->getCalledFunction());
-                  CopyOnWriteMap[Op] = U;
+
+                  if (auto V = getValueFromClosureEnvironment(CS, Env, Op)) {
+                    // Clone the copy-on-write handler and update the arguments
+                    // so that it is callable from elsewhere.
+                    auto Dst = cast<CallBase>(I->clone());
+
+                    for (unsigned i = 0; i < Dst->arg_size(); ++i) {
+                      auto A = Dst->getArgOperand(i);
+
+                      // Indicate the argument we'll need to update later. We
+                      // can't replace this with null for some reason, so use
+                      // the key, which we'll also have access to later.
+                      if (Op == A) {
+                        Dst->setArgOperand(i, V);
+                      }
+
+                      // All arguments to the function must either be a
+                      // constant, or something we can access/specialise from
+                      // the closure environment.
+                      if (!isa<Constant>(A)) {
+                        if (auto R = getValueFromClosureEnvironment(CS, Env, A)) {
+                          Dst->setArgOperand(i, R);
+                        } else {
+                          LLVM_DEBUG(dbgs() << "copy-on-write handler possibly given invalid argument");
+                        }
+                      }
+                    }
+                    CopyOnWriteMap[V] = Dst;
+                  }
                   break;
                 }
               }
@@ -1127,7 +1157,11 @@ void ExtractKernel (
           if (CF) {
             if (!GVs.contains(CF) && !DeclOnlyGVs.contains(CF)) {
               GVs.insert(CF);
-              WorkQueue.push_back(CF);
+              if (!CF->isDeclaration()) {
+                CallStack NewCS = CallStack(CS);
+                NewCS.push_back(CB);
+                WorkQueue.push_back({NewCS,CF});
+              }
             }
           } else {
             LLVM_DEBUG(dbgs() << "Unhandled function call: " << *CB << "\n");
@@ -1185,70 +1219,64 @@ void UpdateClosureEnvironment (
 )
 {
   for (auto [Src,Dst] : CopyOnWriteMap) {
-    if (auto Idx = getClosureIndexOf(Src)) {
-      if (auto V = getValueStoredAt(Idx, Env)) {
-        // This was created in the local scope
-        if (auto A = dyn_cast<AllocaInst>(V)) {
-          for (auto U : A->users()) {
-            if (auto S = dyn_cast<StoreInst>(U)) {
-              if (S->getPointerOperand() != A)
-                continue;
+    auto SrcI = const_cast<Value*>(Src);
+    auto I = cast<CallBase>(Dst);
 
-              // Clone the handler function and update the appropriate operand
-              auto T = S->getValueOperand();
-              auto I = cast<Instruction>(Dst)->clone();
-              for (unsigned i = 0; i < I->getNumOperands(); ++i) {
-                if (I->getOperand(i) == Src)
-                  I->setOperand(i, T);
-              }
+    // This was created in the local scope
+    if (auto A = dyn_cast<AllocaInst>(SrcI)) {
+      for (auto U : A->users()) {
+        if (auto S = dyn_cast<StoreInst>(U)) {
+          if (S->getPointerOperand() != A)
+            continue;
 
-              auto Q = ApplyCopyOnWriteHandler(Context, M, T, I, S);
-              S->setOperand(0, Q);
-              I->dropLocation();  // must be called instruction with parent
-              break;
+          auto T = S->getValueOperand();
+          for (unsigned i = 0; i < I->arg_size(); ++i) {
+            if (I->getArgOperand(i) == Src) {
+              I->setArgOperand(i, T);
             }
           }
-          continue;
+
+          auto Q = ApplyCopyOnWriteHandler(Context, M, T, I, S);
+          S->setOperand(0, Q);  // value operand
+          I->dropLocation();    // must be called on instruction with a parent
+
         }
-
-        // This was a given as a function parameter
-        if (auto A = dyn_cast<Argument>(V)) {
-          for (auto U : A->users()) {
-            if (auto L = dyn_cast<LoadInst>(U)) {
-              // Clone the handler function and update the appropriate operand
-              auto I = cast<Instruction>(Dst)->clone();
-              for (unsigned i = 0; i < I->getNumOperands(); ++i) {
-                if (I->getOperand(i) == Src)
-                  I->setOperand(i, L);
-              }
-
-              auto Q = ApplyCopyOnWriteHandler(Context, M, L, I, L->getNextNonDebugInstruction(), A);
-              I->dropLocation();
-
-              // The load that this function argument is stored in may have been
-              // allocated in non-device-accessible memory by the calling
-              // function (i.e. an alloca). Replace the input argument with a
-              // locally defined alloca and replace subsequent uses of the input
-              // argument with this pointer. The subsequent steps of closure
-              // conversion will translate this into a host memory
-              // (de)allocation that is device accessible.
-              auto InsertBefore = Q->getNextNonDebugInstruction();
-              auto NewA = new AllocaInst(L->getPointerOperandType(), L->getPointerAddressSpace(), "", InsertBefore);
-              new StoreInst(Q, NewA, InsertBefore);
-
-              // Also replace uses with this new alloca
-              DominatorTree DT(*Q->getFunction());
-              A->replaceUsesWithIf(NewA, [&](Use &U){
-                  return DT.dominates(NewA, U);
-                  });
-              break;
-            }
-          }
-          continue;
-        }
-
-        LLVM_DEBUG(dbgs() << "UpdateClosureEnvironment(copy-on-write): unhandled instruction: " << *V << "\n");
       }
+      continue;
+    }
+
+    // This was given as a function parameter
+    if (auto A = dyn_cast<Argument>(SrcI)) {
+      for (auto U : A->users()) {
+        if (auto L = dyn_cast<LoadInst>(U)) {
+          for (unsigned i = 0; i < I->arg_size(); ++i) {
+            if (I->getArgOperand(i) == Src)
+              I->setOperand(i, L);
+          }
+
+          auto Q = ApplyCopyOnWriteHandler(Context, M, L, I, L->getNextNonDebugInstruction(), A);
+          I->dropLocation();
+
+          // The load that this function argument is stored in may have been
+          // allocated in non-device-accessible memory by the calling
+          // function (i.e. an alloca). Replace the input argument with a
+          // locally defined alloca and replace subsequent uses of the input
+          // argument with this pointer. The subsequent steps of closure
+          // conversion will translate this into a host memory
+          // (de)allocation that is device accessible.
+          auto InsertBefore = Q->getNextNonDebugInstruction();
+          auto NewA = new AllocaInst(L->getPointerOperandType(), L->getPointerAddressSpace(), "", InsertBefore);
+          new StoreInst(Q, NewA, InsertBefore);
+
+          // Also replace uses with this new alloca
+          DominatorTree DT(*Q->getFunction());
+          A->replaceUsesWithIf(NewA, [&](Use &U){
+              return DT.dominates(NewA, U);
+              });
+          break;
+        }
+      }
+      continue;
     }
   }
 }
@@ -1664,7 +1692,7 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
     // we might modify this instruction and thus break the sequence.
     Value* V = *U++;
 
-    if (CallInst *CI = dyn_cast<CallInst>(V)) {
+    if (auto *CI = dyn_cast<CallBase>(V)) {
       Value* Iterations = CI->getArgOperand(0);
       Value* Context0 = CI->getArgOperand(1);   // CUcontext
       Value* Context1 = CI->getArgOperand(2);   // { cuDevice, multiProcessorCount }
@@ -1689,7 +1717,7 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
       SmallPtrSet<GlobalValue*, 16> DeclOnlyGVs;
       ValueToValueMapTy IndirectMap;
       ValueToValueMapTy CopyOnWriteMap;
-      ExtractKernel(Context, Body, Env, GVs, DeclOnlyGVs, IndirectMap, CopyOnWriteMap);
+      ExtractKernel(Context, CI, Body, Env, GVs, DeclOnlyGVs, IndirectMap, CopyOnWriteMap);
 
       // Generate PTX assembly for the (set of) functions called by the
       // `parallel_for` launcher, and embed the generated code into the module
