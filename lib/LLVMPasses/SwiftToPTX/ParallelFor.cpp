@@ -64,6 +64,22 @@ static cl::opt<StringRef> TargetFeatures (
   "swift-to-ptx-target-attr", cl::Hidden, cl::init("+ptx81"), // default: +ptx81 (highest version supported by LLVM-17 and CUDA-12.2|L4T R36.3)
   cl::desc("Target specific attributes in swift-to-ptx pass"));
 
+static cl::opt<bool> AllowFPArcp (
+  "swift-to-ptx-allow-fp-arcp", cl::Hidden, cl::init(true),
+  cl::desc("Allow floating-point division to be treated as multiplication by a recriprocal"));
+
+static cl::opt<bool> AllowFPContract (
+  "swift-to-ptx-allow-fp-contract", cl::Hidden, cl::init(true),
+  cl::desc("Allow floating-point contraction, e.g. fusing a multiply followed by an addition into a fused multiply-add"));
+
+static cl::opt<bool> AllowFPAfn (
+  "swift-to-ptx-allow-fp-afn", cl::Hidden, cl::init(true),
+  cl::desc("Allow substitution of approximate calculation for functions, e.g. sin, log, sqrt, etc."));
+
+static cl::opt<bool> AllowFPReassoc (
+  "swift-to-ptx-allow-fp-reassoc", cl::Hidden, cl::init(true),
+  cl::desc("Allow reassociation transformations for floating-point operations"));
+
 static cl::opt<bool> StripDebugInfo (
   "swift-to-ptx-strip-debug-info", cl::Hidden, cl::init(false),
   cl::desc("Strip debug information from device code"));
