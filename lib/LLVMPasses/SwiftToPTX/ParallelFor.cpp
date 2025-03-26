@@ -960,78 +960,63 @@ bool isEquivalentGEP(const GetElementPtrInst* A, const GetElementPtrInst* B)
   return true;
 }
 
-Value* getValueStoredAt(const GetElementPtrInst* E, Value* V)
+// Upsweep phase, where we traverse the environment passed to the parallel_for,
+// following each GEP we encountered in the downsweep phase
+Value* getValueFromClosure(SmallVector<GetElementPtrInst*>& Indices, Value* V)
 {
   if (auto I = dyn_cast<AllocaInst>(V)) {
     for (auto U : I->users()) {
       if (!isa<GetElementPtrInst>(U))
         continue;
 
-      if (auto F = getValueStoredAt(E, U)) {
-        return F;
-      }
+      if (auto R = getValueFromClosure(Indices, U))
+        return R;
     }
   }
 
   if (auto I = dyn_cast<GetElementPtrInst>(V)) {
-    if (isEquivalentGEP(E, I)) {
-      E = nullptr;
-    }
+    auto E = Indices.back();
 
-    for (auto U : I->users()) {
-      if (auto F = getValueStoredAt(E, U)) {
-        return F;
-      }
-    }
+    if (!isEquivalentGEP(E, I))
+      return nullptr;
+
+    assert(I->hasOneUser());
+
+    Indices.pop_back();
+    return getValueFromClosure(Indices, I->getUniqueUndroppableUser());
   }
 
   if (auto I = dyn_cast<StoreInst>(V)) {
-    if (E) {
-      // We are still searching for the correct index
-      return getValueStoredAt(E, I->getValueOperand());
-    } else {
+    if (Indices.empty()) {
       // We can probably delete the store at this point, since we will probably
       // be using this value directly now rather than reading it from the
       // captured closure environment.
       /* I->eraseFromParent(); */
       return I->getValueOperand();
+    } else {
+      return getValueFromClosure(Indices, I->getValueOperand());
     }
   }
 
   return nullptr;
 }
 
-// XXX: This mostly works but is not quite right. Instead of recurring through
-// the given environment parameter (the environment captured by the
-// `parallel_for` invocation), we should instead recover what is exactly the
-// environment that is passed to the partial apply forwarder. Recovering the
-// value stored at the given GEP index should then not require recurring through
-// the environment, it should be found at the "top level", so to speak.
-// Currently we dig down from the top of the environment passed to the
-// `parallel_for` looking for the right index, but we actually rely on the type
-// of the GEP operand to help us locate the right one. This is surely going to
-// not work forever...
-//
-// Furthermore, this will be required once we support more functionality and
-// want to specialise functions that themselves call `parallel_for` with a
-// captured closure parameter.
-//     --- TLM 2025-03-21
-//
-Value* getValueFromClosureEnvironment(CallStack CS, Value* Env, Value* V)
+// Downsweep phase, where we build a stack of indices into the closure
+// environment until we reach the parallel_for invocation
+Value* getValueFromClosure(CallStack& CS, SmallVector<GetElementPtrInst*>& Indices, Value* Env, Value* V)
 {
-
   if (auto I = dyn_cast<Argument>(V)) {
-    // This is an argument to a (indirect) function call. Trace up the call
-    // stack and examine the calling function.
+    // This was an argument to a function call. Trace up the call stack to
+    // examine the calling function. Once we reach the top of the stack---the
+    // call to parallel_for---then we can work our way back up the indices stack
+    // poking through the environment.
     auto CB = CS.back();
     CS.pop_back();
 
-    // If we pop all the way back and still haven't found anything, we'll be
-    // poking the `parallel_for` call, so the argument index at the callee
-    // won't match...
-    assert(!CS.empty());
-
-    return getValueFromClosureEnvironment(CS, Env, CB->getOperand(I->getArgNo()));
+    if (CS.empty())
+      return getValueFromClosure(Indices, Env);
+    else
+      return getValueFromClosure(CS, Indices, Env, CB->getOperand(I->getArgNo()));
   }
 
   if (auto I = dyn_cast<GlobalValue>(V)) {
@@ -1039,14 +1024,26 @@ Value* getValueFromClosureEnvironment(CallStack CS, Value* Env, Value* V)
   }
 
   if (auto I = dyn_cast<LoadInst>(V)) {
-    return getValueFromClosureEnvironment(CS, Env, I->getPointerOperand());
+    return getValueFromClosure(CS, Indices, Env, I->getPointerOperand());
   }
 
   if (auto I = dyn_cast<GetElementPtrInst>(V)) {
-    return getValueStoredAt(I, Env);
+    Indices.push_back(I);
+    return getValueFromClosure(CS, Indices, Env, I->getPointerOperand());
   }
 
   return nullptr;
+}
+
+
+// Entry point to peek through the closure environment looking for values that
+// were stored in it that we can specialise on (namely, indirect function
+// calls). Note that this version takes a copy of the callstack, so that we are
+// free to mutate it in the recursive invocation that does the actual work.
+Value* getValueFromClosure(CallStack CS, Value* Env, Value* V)
+{
+  SmallVector<GetElementPtrInst*> Indices;
+  return getValueFromClosure(CS, Indices, Env, V);
 }
 
 void ExtractKernel (
@@ -1065,7 +1062,7 @@ void ExtractKernel (
 
   // The continuation launched might in turn call other functions. Recursively
   // record those functions for extraction as well.
-  std::vector<std::pair<CallStack, Function *>> WorkQueue;
+  std::vector<std::pair<CallStack, Function*>> WorkQueue;
   WorkQueue.push_back({{Root}, F});
 
   while (!WorkQueue.empty()) {
@@ -1078,10 +1075,12 @@ void ExtractKernel (
           Function* CF = nullptr;
 
           if (CB->isIndirectCall()) {
-            CF = dyn_cast_if_present<Function>(getValueFromClosureEnvironment(CS, Env, CB->getCalledOperand()));
+            CF = dyn_cast_if_present<Function>(getValueFromClosure(CS, Env, CB->getCalledOperand()));
 
-            if (!CF)
-              report_fatal_error("swift-to-ptx: could not specialise indirect function call", false);
+            if (!CF) {
+              LLVM_DEBUG(dbgs() << "warning: could not specialise indirect function call");
+              continue;
+            }
 
             IndirectMap[CB] = CF;
           } else {
@@ -1102,6 +1101,9 @@ void ExtractKernel (
             // pointer again because it may have been updated by the CoW
             // mechanism. We should remove this.
             //    ---TLM 2025-02-17
+            //
+            // TODO: Should probably split this out, it's a bit of a mess...
+            //    ---TLM 2025-03-25
             if (CF->getName() == "swift_isUniquelyReferenced_nonNull_native") {
               auto Op = CB->getOperand(0);
               for (auto U : Op->users()) {
@@ -1111,7 +1113,7 @@ void ExtractKernel (
                 if (auto I = dyn_cast<CallBase>(U)) {
                   DeclOnlyGVs.insert(I->getCalledFunction());
 
-                  if (auto V = getValueFromClosureEnvironment(CS, Env, Op)) {
+                  if (auto V = getValueFromClosure(CS, Env, Op)) {
                     // Clone the copy-on-write handler and update the arguments
                     // so that it is callable from elsewhere.
                     auto Dst = cast<CallBase>(I->clone());
@@ -1130,7 +1132,7 @@ void ExtractKernel (
                       // constant, or something we can access/specialise from
                       // the closure environment.
                       if (!isa<Constant>(A)) {
-                        if (auto R = getValueFromClosureEnvironment(CS, Env, A)) {
+                        if (auto R = getValueFromClosure(CS, Env, A)) {
                           Dst->setArgOperand(i, R);
                         } else {
                           LLVM_DEBUG(dbgs() << "copy-on-write handler possibly given invalid argument");
