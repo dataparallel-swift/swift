@@ -646,36 +646,42 @@ ArrayRef<uint8_t> CreateKernel
   }
 #endif
 
-  // Loop over all of the functions that we need to copy from the input module.
+  // Loop over all of the globals that we need to copy from the input module.
   // Just make the declarations, the bodies will come later. Take care of
   // functions that need to be handled specially on the device.
   bool HaveLibdevice = false;
   DeclOnlyGVs.insert(GVs.begin(), GVs.end());
   for (auto I : DeclOnlyGVs) {
-    Function *Src = cast<Function>(I);
+    if (auto Src = dyn_cast<Function>(I)) {
+      // If this is a declaration for a function provided by libdevice (e.g.
+      // llvm.sin.f32) then link in the libdevice module and record in the VMap
+      // the mapping to the corresponding libdevice implementation (e.g. __nvsinf).
+      //
+      // Delay linking in libdevice to the point where we are certain we need
+      // it, which saves a few hundred ms in case it would not have been used.
+      StringRef Name = Src->getName();
+      StringRef Lib  = libdeviceFunctions.lookup(Name);
+      if (!Lib.empty()) {
+          if (!HaveLibdevice) {
+            LinkInLibdeviceModule(*K, Context);
+            HaveLibdevice = true;
+          }
+          VMap[Src] = K->getFunction(Lib);
+          continue;
+      }
 
-    // If this is a declaration for a function provided by libdevice (e.g.
-    // llvm.sin.f32) then link in the libdevice module and record in the VMap the
-    // mapping to the corresponding libdevice implementation (e.g. __nvsinf).
-    //
-    // Delay linking in libdevice to this point where we are certain we need it,
-    // which saves a few hundred ms in case it would not have been used.
-    StringRef Name = Src->getName();
-    StringRef Lib  = libdeviceFunctions.lookup(Name);
-    if (!Lib.empty()) {
-        if (!HaveLibdevice) {
-          LinkInLibdeviceModule(*K, Context);
-          HaveLibdevice = true;
-        }
-        VMap[Src] = K->getFunction(Lib);
-        continue;
+      // Otherwise, this is just a regular function (declaration). Just make the
+      // declaration, we'll copy over the function body later.
+      Function* Dst = Function::Create(Src->getFunctionType(), Src->getLinkage(), Name, *K);
+      Dst->copyAttributesFrom(Src);
+      VMap[Src] = Dst;
     }
 
-    // Otherwise, this is just a regular function (declaration). Just make the
-    // declaration, we'll copy over the function body later.
-    Function* Dst = Function::Create(Src->getFunctionType(), Src->getLinkage(), Name, *K);
-    Dst->copyAttributesFrom(Src);
-    VMap[Src] = Dst;
+    if (auto Src = dyn_cast<GlobalVariable>(I)) {
+      GlobalVariable *Dst = new GlobalVariable(*K, Src->getValueType(), Src->isConstant(), Src->getLinkage(), nullptr, Src->getName(), nullptr, Src->getThreadLocalMode(), Src->getType()->getAddressSpace());
+      Dst->copyAttributesFrom(Src);
+      VMap[Src] = Dst;
+    }
   }
 
 #if DEBUG_CLONE_ALL_GLOBALS
@@ -715,45 +721,77 @@ ArrayRef<uint8_t> CreateKernel
   }
 #endif
 
-  // Copy over the function bodies. Also enable floating point contraction for
-  // compatible instructions and specialise indirect function calls.
+  // Now that all things that a global variable initializer can refer to have
+  // been created, copy any initialisers over. For any functions we copy over
+  // the body of the function now, as well as enable floating point contraction
+  // for compatible instructions and specialise any indirect function calls.
   for (auto I : GVs) {
+    // Copy any metadata
+    if (auto Src = dyn_cast<GlobalObject>(I)) {
+      GlobalObject* Dst = cast_if_present<GlobalObject>(VMap[Src]);
+      if (!Dst)
+        continue;
+
+      SmallVector<std::pair<unsigned, MDNode*>> MDs;
+      Src->getAllMetadata(MDs);
+      for (auto MD : MDs)
+        Dst->addMetadata(MD.first, *MapMetadata(MD.second, VMap));
+    }
+
+    // If this is only a declaration, we are done
     if (I->isDeclaration())
       continue;
 
-    Function *Src = cast<Function>(I);
-    Function *Dst = cast<Function>(VMap[Src]);
+    // Copy global variable initialisers
+    if (auto Src = dyn_cast<GlobalVariable>(I)) {
+      GlobalVariable* Dst = cast_if_present<GlobalVariable>(VMap[Src]);
+      if (!Dst)
+        continue;
 
-    Function::arg_iterator DstI = Dst->arg_begin();
-    for (const Argument &I : Src->args()) {
-      DstI->setName(I.getName());
-      VMap[&I] = &*DstI++;
+      if (Src->hasInitializer())
+        Dst->setInitializer(MapValue(Src->getInitializer(), VMap));
     }
-    SmallVector<ReturnInst *> Returns;
-    CloneFunctionInto(Dst, Src, VMap, CloneFunctionChangeType::DifferentModule, Returns);
-    /* TypeContextRemapper TypeMapper(Context); */
-    /* PointerAddressSpaceUpdater TypeMapper; */
-    /* CloneFunctionInto(Dst, Src, VMap, CloneFunctionChangeType::DifferentModule, Returns, "", nullptr, &TypeMapper); */
-    Dst->setCallingConv(Src->getCallingConv());
-    Dst->setLinkage(GlobalValue::InternalLinkage);
 
-    if (Src->hasPersonalityFn())
-      Dst->setPersonalityFn(MapValue(Src->getPersonalityFn(), VMap));
+    // Copy function bodies and add any specialisations
+    if (auto Src = dyn_cast<Function>(I)) {
+      auto Dst = cast_if_present<Function>(VMap[Src]);
+      if (!Dst)
+        continue;
 
-    // Update any per-instruction attributes
-    for (auto &BB : *Dst) {
-      for (auto &I : BB) {
-        // Allow floating-point contraction (i.e. FMA)
-        if (isa<FPMathOperator>(&I)) {
-          I.setHasAllowContract(true);
-        }
+      Function::arg_iterator DstI = Dst->arg_begin();
+      for (const Argument &I : Src->args()) {
+        DstI->setName(I.getName());
+        VMap[&I] = &*DstI++;
+      }
+      SmallVector<ReturnInst *> Returns;
+      CloneFunctionInto(Dst, Src, VMap, CloneFunctionChangeType::DifferentModule, Returns);
+      /* TypeContextRemapper TypeMapper(Context); */
+      /* PointerAddressSpaceUpdater TypeMapper; */
+      /* CloneFunctionInto(Dst, Src, VMap, CloneFunctionChangeType::DifferentModule, Returns, "", nullptr, &TypeMapper); */
+      Dst->setCallingConv(Src->getCallingConv());
+      Dst->setLinkage(GlobalValue::InternalLinkage);
 
-        // Allow function calls to be inlined. This attribute tends to creep in
-        // because we currently need to sprinkle @inline(never) in places to
-        // ensure that all Swift code for the GPU code is present in a single
-        // LLVM module.
-        if (auto CB = dyn_cast<CallBase>(&I)) {
-          CB->removeFnAttr(Attribute::NoInline);
+      if (Src->hasPersonalityFn())
+        Dst->setPersonalityFn(MapValue(Src->getPersonalityFn(), VMap));
+
+      // Update any per-instruction attributes
+      for (auto &BB : *Dst) {
+        for (auto &I : BB) {
+          // Set any floating-point rewrite rules
+          if (isa<FPMathOperator>(&I)) {
+            I.setHasAllowReciprocal(AllowFPArcp);
+            I.setHasAllowContract(AllowFPContract);
+            I.setHasApproxFunc(AllowFPAfn);
+            I.setHasAllowReassoc(AllowFPReassoc);
+          }
+
+          // Allow function calls to be inlined. This attribute tends to creep in
+          // because we currently need to sprinkle @inline(never) in places to
+          // ensure that all Swift code for the GPU code is present in a single
+          // LLVM module.
+          if (auto CB = dyn_cast<CallBase>(&I)) {
+            CB->removeFnAttr(Attribute::NoInline);
+          }
         }
       }
     }
@@ -1167,6 +1205,13 @@ void ExtractKernel (
             }
           } else {
             LLVM_DEBUG(dbgs() << "Unhandled function call: " << *CB << "\n");
+          }
+        }
+        if (auto *L = dyn_cast<LoadInst>(&I)) {
+          if (auto G = dyn_cast<GlobalVariable>(L->getPointerOperand())) {
+            if (!GVs.contains(G)) {
+              GVs.insert(G);
+            }
           }
         }
       }
