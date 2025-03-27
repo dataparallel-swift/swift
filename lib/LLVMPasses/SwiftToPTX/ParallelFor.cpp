@@ -48,6 +48,10 @@ using namespace llvm;
 
 namespace {
 
+static cl::opt<bool> Verbose (
+  "swift-to-ptx-verbose", cl::Hidden, cl::init(false),
+  cl::desc("Use verbose output"));
+
 static cl::opt<bool> KeepIntermediateFiles (
   "swift-to-ptx-keep-intermediate-files", cl::Hidden, cl::init(false),
   cl::desc("Keep intermediate files of swift-to-ptx pass"));
@@ -563,6 +567,8 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
       assert(offset < capacity);
     }
     StringRef msg = StringRef(msg_buffer, offset);
+    if (Verbose)
+      errs() << msg;
 
     // Get the exit status of the process
     int status = 0;
