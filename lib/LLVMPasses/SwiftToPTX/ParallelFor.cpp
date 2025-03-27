@@ -475,7 +475,7 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
   int fd2[2]; // stderr
 
   if ( pipe(fd0) < 0 || pipe(fd1) < 0 || pipe(fd2) < 0) {
-    report_fatal_error("pipe error", false);
+    report_fatal_error("pipe() error", false);
   }
 
   pid_t pid = fork();
@@ -534,39 +534,60 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
     close(fd0[1]); // send EOF
 
     // Read data from the connected pipes
-    size_t   capacity   = 65536;
-    uint8_t* obj_buffer = (uint8_t*) malloc(capacity); // 64KB
-    char*    msg_buffer = (char*)    malloc(capacity); // overkill
+    size_t   offset;
+    size_t   capacity;
+    uint8_t* obj_buffer;
+    char*    msg_buffer;
 
     // Read in the compiled object code
-    size_t offset = 0;
+    offset = 0;
+    capacity = 65536; // 64KB, the smallest functions are around ~22KB (with debug info)
+    obj_buffer = (uint8_t*) malloc(capacity);
     while (true) {
+      if (!obj_buffer)
+        report_fatal_error("malloc() error", false);
+
       ssize_t rv = read(fd1[0], obj_buffer + offset, capacity - offset);
       if (rv == 0)
         break;  // child closed pipe
 
       if (rv < 0)
-        report_fatal_error("pipe error", false);
+        report_fatal_error("pipe() error", false);
 
       offset += rv;
-      assert(offset < capacity);
+      if (offset == capacity) {
+        // Not a great multiplicative factor to choose as it causes
+        // heap fragmentation, but it won't live for much longer anyway
+        capacity  *= 2;
+        obj_buffer = (uint8_t*) realloc(obj_buffer, capacity);
+      }
     }
     ArrayRef<uint8_t> obj = ArrayRef(obj_buffer, offset);
 
     // Read in any error/warning messages
     offset = 0;
+    capacity = 1024;  // 1KB, should be more than large enough
+    msg_buffer = (char*) malloc(capacity);
     while (true) {
+      if (!msg_buffer)
+        report_fatal_error("malloc() error", false);
+
       ssize_t rv = read(fd2[0], msg_buffer + offset, capacity - offset);
       if (rv == 0)
         break;  // child closed pipe
 
       if (rv < 0)
-        report_fatal_error("pipe error", false);
+        report_fatal_error("pipe() error", false);
 
       offset += rv;
-      assert(offset < capacity);
+      if (offset == capacity) {
+        capacity  *= 2; // see comment above
+        msg_buffer = (char*) realloc(msg_buffer, capacity);
+      }
     }
     StringRef msg = StringRef(msg_buffer, offset);
+
+    // Information about register usage etc. of the compiled kernel
     if (Verbose)
       errs() << msg;
 
@@ -1229,6 +1250,7 @@ void ExtractKernel (
             LLVM_DEBUG(dbgs() << "Unhandled function call: " << *CB << "\n");
           }
         }
+
         if (auto *L = dyn_cast<LoadInst>(&I)) {
           if (auto G = dyn_cast<GlobalVariable>(L->getPointerOperand())) {
             if (!GVs.contains(G)) {
