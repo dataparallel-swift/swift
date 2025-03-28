@@ -242,10 +242,13 @@ attributes #1 = { sspreq "frame-pointer"="non-leaf" "no-trapping-math"="true" "s
 // TODO: Missing operations might be supportable by mapping to other
 // intrinsics/sequences.
 //
+// NOTE: Several of these mappings are disabled because they will be undone by
+// later stages of the optimiser anyway.
+//
 const StringMap<StringRef> libdeviceFunctions =
-  {{"llvm.abs.i64",         "__nv_llabs"}
-  ,{"llvm.abs.i32",         "__nv_abs"}
-  ,{"llvm.smax.i64",        "__nv_llmax"}
+  /* {{"llvm.abs.i64",         "__nv_llabs"} */
+  /* ,{"llvm.abs.i32",         "__nv_abs"} */
+  {{"llvm.smax.i64",        "__nv_llmax"}
   ,{"llvm.smax.i32",        "__nv_max"}
   ,{"llvm.smin.i64",        "__nv_llmin"}
   ,{"llvm.smin.i32",        "__nv_min"}
@@ -259,36 +262,60 @@ const StringMap<StringRef> libdeviceFunctions =
   /* ,{"llvm.memmove.inline",  "" */
   /* ,{"llvm.memset",          "" */
   /* ,{"llvm.memset.inline",   "" */
-  ,{"llvm.sqrt.f64",        "__nv_sqrt"},   {"sqrt",  "__nv_sqrt"}
-  ,{"llvm.sqrt.f32",        "__nv_sqrtf"},  {"sqrtf", "__nv_sqrtf"}
+  ,{"sqrt",                 "__nv_sqrt"}      /* ,{"llvm.sqrt.f64",        "__nv_sqrt"} */
+  ,{"sqrtf",                "__nv_sqrtf"}     /* ,{"llvm.sqrt.f32",        "__nv_sqrtf"} */
   ,{"llvm.powi.f64.i32",    "__nv_powi"}
   ,{"llvm.powi.f32.i32",    "__nv_powif"}
-  ,{"llvm.sin.f64",         "__nv_sin"},    {"sin",   "__nv_sin"}
-  ,{"llvm.sin.f32",         "__nv_sinf"},   {"sinf",  "__nv_sinf"}
-  ,{"llvm.cos.f64",         "__nv_cos"},    {"cos",   "__nv_cos"}
-  ,{"llvm.cos.f32",         "__nv_cosf"},   {"cosf",  "__nv_cosf"}
-  ,{"llvm.pow.f64",         "__nv_pow"}
-  ,{"llvm.pow.f32",         "__nv_powf"}
-  ,{"llvm.exp.f64",         "__nv_exp"}
-  ,{"llvm.exp.f32",         "__nv_expf"}
-  ,{"llvm.exp2.f64",        "__nv_exp2"}
-  ,{"llvm.exp2.f32",        "__nv_exp2f"}
-  ,{"llvm.exp10.f64",       "__nv_exp10"}
-  ,{"llvm.exp10.f32",       "__nv_exp10f"}
+  ,{"sin",                  "__nv_sin"}       /* ,{"llvm.sin.f64",         "__nv_sin"} */
+  ,{"sinf",                 "__nv_sinf"}      /* ,{"llvm.sin.f32",         "__nv_sinf"} */
+  ,{"cos",                  "__nv_cos"}       /* ,{"llvm.cos.f64",         "__nv_cos"} */
+  ,{"cosf",                 "__nv_cosf"}      /* ,{"llvm.cos.f32",         "__nv_cosf"} */
+  ,{"tan",                  "__nv_tan"}       /* ,{"llvm.tan.f64",         "__nv_tan"} */
+  ,{"tanf",                 "__nv_tanf"}      /* ,{"llvm.tan.f32",         "__nv_tanf"} */
+  ,{"asin",                 "__nv_asin"}      /* ,{"llvm.asin.f64",        "__nv_asin"} */
+  ,{"asinf",                "__nv_asinf"}     /* ,{"llvm.asin.f32",        "__nv_asinf"} */
+  ,{"acos",                 "__nv_acos"}      /* ,{"llvm.acos.f64",        "__nv_acos"} */
+  ,{"acosf",                "__nv_acosf"}     /* ,{"llvm.acos.f32",        "__nv_acosf"} */
+  ,{"atan",                 "__nv_atan"}      /* ,{"llvm.atan.f64",        "__nv_atan"} */
+  ,{"atanf",                "__nv_atanf"}     /* ,{"llvm.atan.f32",        "__nv_tanf"} */
+  ,{"sinh",                 "__nv_sinh"}      /* ,{"llvm.sinh.f64",        "__nv_sinh"} */
+  ,{"sinhf",                "__nv_sinhf"}     /* ,{"llvm.sinh.f32",        "__nv_sinhf"} */
+  ,{"cosh",                 "__nv_cosh"}      /* ,{"llvm.cosh.f64",        "__nv_cosh"} */
+  ,{"coshf",                "__nv_coshf"}     /* ,{"llvm.cosh.f32",        "__nv_coshf"} */
+  ,{"tanh",                 "__nv_tanh"}      /* ,{"llvm.tanh.f64",        "__nv_tanh"} */
+  ,{"tanhf",                "__nv_tanhf"}     /* ,{"llvm.tanh.f32",        "__nv_tanhf"} */
+  ,{"asinh",                "__nv_asinh"}
+  ,{"asinhf",               "__nv_asinhf"}
+  ,{"acosh",                "__nv_acosh"}
+  ,{"acoshf",               "__nv_acoshf"}
+  ,{"atanh",                "__nv_atanh"}
+  ,{"atanhf",               "__nv_atanhf"}
+  ,{"pow",                  "__nv_pow"}       /* ,{"llvm.pow.f64",         "__nv_pow"} */
+  ,{"powf",                 "__nv_powf"}      /* ,{"llvm.pow.f32",         "__nv_powf"} */
+  ,{"exp",                  "__nv_exp"}       /* ,{"llvm.exp.f64",         "__nv_exp"} */
+  ,{"expf",                 "__nv_expf"}      /* ,{"llvm.exp.f32",         "__nv_expf"} */
+  ,{"expm1",                "__nv_expm1"}
+  ,{"expm1f",               "__nv_expm1f"}
+  ,{"exp2",                 "__nv_exp2"}      /* ,{"llvm.exp2.f64",        "__nv_exp2"} */
+  ,{"exp2f",                "__nv_exp2f"}     /* ,{"llvm.exp2.f32",        "__nv_exp2f"} */
+  ,{"exp10",                "__nv_exp10"}     /* ,{"llvm.exp10.f64",       "__nv_exp10"} */
+  ,{"exp10f",               "__nv_exp10f"}    /* ,{"llvm.exp10.f32",       "__nv_exp10f"} */
   ,{"llvm.ldexp.f64.i32",   "__nv_ldexp"}
   ,{"llvm.ldexp.f32.i32",   "__nv_ldexp"}
   ,{"llvm.frexp.f64.i32",   "__nv_frexp"}
   ,{"llvm.frexp.f32.i32",   "__nv_frexpf"}
-  ,{"llvm.log.f64",         "__nv_log"}
-  ,{"llvm.log.f32",         "__nv_logf"}
-  ,{"llvm.log10.f64",       "__nv_log10"}
-  ,{"llvm.log10.f32",       "__nv_log10f"}
-  ,{"llvm.log2.f64",        "__nv_log2"}
-  ,{"llvm.log2.f32",        "__nv_log2f"}
+  ,{"log",                  "__nv_log"}       /* ,{"llvm.log.f64",         "__nv_log"} */
+  ,{"logf",                 "__nv_logf"}      /* ,{"llvm.log.f32",         "__nv_logf"} */
+  ,{"log1p",                "__nv_log1p"}
+  ,{"log1pf",               "__nv_log1pf"}
+  ,{"log10",                "__nv_log10"}     /* ,{"llvm.log10.f64",       "__nv_log10"} */
+  ,{"log10f",               "__nv_log10f"}    /* ,{"llvm.log10.f32",       "__nv_log10f"} */
+  ,{"log2",                 "__nv_log2"}      /* ,{"llvm.log2.f64",        "__nv_log2"} */
+  ,{"log2f",                "__nv_log2f"}     /* ,{"llvm.log2.f32",        "__nv_log2f"} */
   ,{"llvm.fma.f64",         "__nv_fma"}
   ,{"llvm.fma.f32",         "__nv_fmaf"}
-  ,{"llvm.fabs.f64",        "__nv_fabs"}
-  ,{"llvm.fabs.f32",        "__nv_fabsf"}
+  /* ,{"llvm.fabs.f64",        "__nv_fabs"} */
+  /* ,{"llvm.fabs.f32",        "__nv_fabsf"} */
   ,{"llvm.minnum.f64",      "__nv_fmin"}
   ,{"llvm.minnum.f32",      "__nv_fminf"}
   ,{"llvm.maxnum.f64",      "__nv_fmax"}
@@ -297,18 +324,18 @@ const StringMap<StringRef> libdeviceFunctions =
   /* ,{"llvm.maximum.*",       ""} */
   ,{"llvm.copysign.f64",    "__nv_copysign"}
   ,{"llvm.copysign.f32",    "__nv_copysignf"}
-  ,{"llvm.floor.f64",       "__nv_floor"}
-  ,{"llvm.floor.f32",       "__nv_floorf"}
-  ,{"llvm.ceiling.f64",     "__nv_ceiling"}
-  ,{"llvm.ceiling.f32",     "__nv_ceilingf"}
+  /* ,{"llvm.floor.f64",       "__nv_floor"} */
+  /* ,{"llvm.floor.f32",       "__nv_floorf"} */
+  /* ,{"llvm.ceiling.f64",     "__nv_ceiling"} */
+  /* ,{"llvm.ceiling.f32",     "__nv_ceilingf"} */
   ,{"llvm.trunc.f64",       "__nv_trunc"}
   ,{"llvm.trunc.f32",       "__nv_truncf"}
   ,{"llvm.rint.f64",        "__nv_rint"}
   ,{"llvm.rint.f32",        "__nv_rintf"}
   ,{"llvm.nearbyint.f64",   "__nv_nearbyint"}
   ,{"llvm.nearbyint.f32",   "__nv_nearbyintf"}
-  ,{"llvm.round.f64",       "__nv_round"}
-  ,{"llvm.round.f32",       "__nv_roundf"}
+  /* ,{"llvm.round.f64",       "__nv_round"} */
+  /* ,{"llvm.round.f32",       "__nv_roundf"} */
   /* ,{"llvm.roundeven.*",     ""} */
   /* ,{"llvm.lround.*",        ""} */
   ,{"llvm.llround.i64.f64", "__nv_llround"}
@@ -318,13 +345,21 @@ const StringMap<StringRef> libdeviceFunctions =
   ,{"llvm.llrint.i64.f32",  "__nv_llrintf"}
   /* ,{"llvm.bitreverse.*",    ""} */
   /* ,{"llvm.bswap.*",         ""} */
-  ,{"llvm.ctpop.i64",       "__nv_popcll"}
-  ,{"llvm.ctpop.i32",       "__nv_popc"}
-  ,{"llvm.ctlz.i64",        "__nv_clzll"}
-  ,{"llvm.ctlz.i32",        "__nv_clz"}
+  /* ,{"llvm.ctpop.i64",       "__nv_popcll"} */
+  /* ,{"llvm.ctpop.i32",       "__nv_popc"} */
+  /* ,{"llvm.ctlz.i64",        "__nv_clzll"} */
+  /* ,{"llvm.ctlz.i32",        "__nv_clz"} */
   /* ,{"llvm.cttz.*",          ""} */
   /* ,{"llvm.fshl.*",          ""} */
   /* ,{"llvm.fshr.*",          ""} */
+  ,{"erf",                  "__nv_erf"}
+  ,{"erff",                 "__nv_erff"}
+  ,{"erfc",                 "__nv_erfc"}
+  ,{"erfcf",                "__nv_erfcf"}
+  ,{"tgamma",               "__nv_tgamma"}
+  ,{"tgammaf",              "__nv_tgammaf"}
+  ,{"lgamma_r",             "__nv_lgamma"}
+  ,{"lgammaf_r",            "__nv_lgammaf"}
   };
 
 
