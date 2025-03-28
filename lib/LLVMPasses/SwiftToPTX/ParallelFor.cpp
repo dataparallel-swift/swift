@@ -1812,7 +1812,7 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
   Function* Fpar = M.getFunction("$s10SwiftToPTX19launch_parallel_for10iterations7context6stream6kernel3env10swifterror11thrownerrorAA5EventCSi_AA7ContextVAA6StreamVAA17ParallelForKernelVzS3vtF");
   StructType* kernel_t = StructType::getTypeByName(Context, "T10SwiftToPTX17ParallelForKernelV");
 
-  // Iterate over all uses of the `parallel_for(iterations: body:)` function
+  // Iterate over all uses of the `parallel_for` function
   for (auto U = Fseq->user_begin(), UE = Fseq->user_end(); U != UE; /* See: [1] */) {
     // NOTE [1]: Update the iterator to point to the next User already, because
     // we might modify this instruction and thus break the sequence.
