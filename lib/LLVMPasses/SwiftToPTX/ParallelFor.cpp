@@ -1193,10 +1193,8 @@ void ExtractKernel (
           if (CB->isIndirectCall()) {
             CF = dyn_cast_if_present<Function>(getValueFromClosure(CS, Env, CB->getCalledOperand()));
 
-            if (!CF) {
-              LLVM_DEBUG(dbgs() << "warning: could not specialise indirect function call");
-              continue;
-            }
+            if (!CF)
+              report_fatal_error("swift-to-ptx: could not specialise indirect function call", false);
 
             IndirectMap[CB] = CF;
           } else {
@@ -1812,105 +1810,132 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
   Function* Fpar = M.getFunction("$s10SwiftToPTX19launch_parallel_for10iterations7context6stream6kernel3env10swifterror11thrownerrorAA5EventCSi_AA7ContextVAA6StreamVAA17ParallelForKernelVzS3vtF");
   StructType* kernel_t = StructType::getTypeByName(Context, "T10SwiftToPTX17ParallelForKernelV");
 
-  // Iterate over all uses of the `parallel_for` function
-  for (auto U = Fseq->user_begin(), UE = Fseq->user_end(); U != UE; /* See: [1] */) {
-    // NOTE [1]: Update the iterator to point to the next User already, because
-    // we might modify this instruction and thus break the sequence.
-    Value* V = *U++;
+  // We may encounter functions that need to be inlined into their callsite so
+  // that the kernels can be specialised. In future we may want to revisit this,
+  // and instead have the calling functions pass down a reference to the
+  // compiled kernel module that should be used (in place of pointer to the
+  // function to put into the environment that will be indirectly called, for
+  // example).
+  SmallVector<Value*, 8> WorkQueue(Fseq->users());
 
-    if (auto *CI = dyn_cast<CallBase>(V)) {
-      Value* Iterations = CI->getArgOperand(0);
-      Value* Context0 = CI->getArgOperand(1);   // CUcontext
-      Value* Context1 = CI->getArgOperand(2);   // { cuDevice, multiProcessorCount }
-      Value* Context2 = CI->getArgOperand(3);   // { maxThreadsPerMultiprocessor, warpSize }
-      Value* Allocator0 = CI->getArgOperand(4); // bin_size_bytes
-      Value* Allocator1 = CI->getArgOperand(5); // cached_blocks
-      Value* Allocator2 = CI->getArgOperand(6); // live_blocks
-      Value* Stream = CI->getArgOperand(7);
-      Value* Body = CI->getArgOperand(8);
-      Value* Env = CI->getArgOperand(9);
-      /* Value* TypeMetadata = CI->getArgOperand(10); */
-      /* Value* ProtocolWitnessTable = CI->getArgOperand(11); */
-      /* Value* SwiftSelf = CI->getArgOperand(12); */
-      /* Value* SwiftError = CI->getArgOperand(13); */
-      Value* ThrownError = CI->getArgOperand(14);
+  while (!WorkQueue.empty()) {
+    auto CI = dyn_cast<CallBase>(WorkQueue.back());
+    WorkQueue.pop_back();
+    if (!CI)
+      continue;
 
-      // Extract the set of global functions that this kernel consists of. Also
-      // keep track of indirect functions that need to be specialised at the
-      // call site, as well as copy-on-write handlers that will be lifted out of
-      // the kernel into the closure environment setup phase.
-      SmallPtrSet<GlobalValue*, 16> GVs;
-      SmallPtrSet<GlobalValue*, 16> DeclOnlyGVs;
-      ValueToValueMapTy IndirectMap;
-      ValueToValueMapTy CopyOnWriteMap;
-      ExtractKernel(Context, CI, Body, Env, GVs, DeclOnlyGVs, IndirectMap, CopyOnWriteMap);
+    Value* Iterations = CI->getArgOperand(0);
+    Value* Context0 = CI->getArgOperand(1);   // CUcontext
+    Value* Context1 = CI->getArgOperand(2);   // { cuDevice, multiProcessorCount }
+    Value* Context2 = CI->getArgOperand(3);   // { maxThreadsPerMultiprocessor, warpSize }
+    Value* Allocator0 = CI->getArgOperand(4); // bin_size_bytes
+    Value* Allocator1 = CI->getArgOperand(5); // cached_blocks
+    Value* Allocator2 = CI->getArgOperand(6); // live_blocks
+    Value* Stream = CI->getArgOperand(7);
+    Value* Body = CI->getArgOperand(8);
+    Value* Env = CI->getArgOperand(9);
+    /* Value* TypeMetadata = CI->getArgOperand(10); */
+    /* Value* ProtocolWitnessTable = CI->getArgOperand(11); */
+    /* Value* SwiftSelf = CI->getArgOperand(12); */
+    /* Value* SwiftError = CI->getArgOperand(13); */
+    Value* ThrownError = CI->getArgOperand(14);
 
-      // Generate PTX assembly for the (set of) functions called by the
-      // `parallel_for` launcher, and embed the generated code into the module
-      ArrayRef<uint8_t> Obj = CreateKernel(Context, M, Body->getName(), GVs, DeclOnlyGVs, IndirectMap);
-      size_t buffer_size = Obj.size();
-      IntegerType* i8_t = IntegerType::getInt8Ty(Context);
-      ArrayType* image_t = ArrayType::get(i8_t, buffer_size);
+    // Do we need to specialise this instance into its call site?
+    if (auto I = dyn_cast<Argument>(Body)) {
+      for (auto U : CI->getFunction()->users()) {
+        auto CB = dyn_cast<CallBase>(U);
+        if (!CB)
+          continue;
 
-      std::vector<Constant*> KernelData(buffer_size);
-      std::transform(Obj.begin(), Obj.end(), KernelData.begin(), [&](uint8_t c) { return ConstantInt::get(i8_t, c); });
-      free((void*) Obj.data()); // ArrayRef does not own the underlying buffer
+        InlineFunctionInfo IFI;
+        auto R = InlineFunction(*CB, IFI);
+        if (!R.isSuccess())
+          report_fatal_error(R.getFailureReason());
 
-      GlobalVariable* Image = new GlobalVariable(M, image_t, true, GlobalValue::InternalLinkage, ConstantArray::get(image_t, ArrayRef(KernelData)));
-      Image->setAlignment(Align(1));
-      Image->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
-
-      // Swift is kind of bonkers and wraps all data types as struct types,
-      GlobalVariable* Kernel = new GlobalVariable(M, kernel_t, false,
-          GlobalValue::InternalLinkage,
-          ConstantStruct::get(kernel_t,
-              { ConstantStruct::get(cast<StructType>(kernel_t->getElementType(0)), {Image})
-              , ConstantAggregateZero::get(kernel_t->getElementType(1))
-              , ConstantAggregateZero::get(kernel_t->getElementType(2))
-              , ConstantAggregateZero::get(kernel_t->getElementType(3))
-              , ConstantAggregateZero::get(kernel_t->getElementType(4))
-              }));
-      Kernel->setAlignment(Align(8));
-      Kernel->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
-
-      // Create temporary placeholders for the swifterror and throwerror terms
-      // that can be passed to the GPU kernel. These will need to be
-      // synchronised with the "real" swift error terms once the kernel
-      // completes, but most likely we'll have to wait until we have this marked
-      // as an 'async throws' function until that will work correctly.
-      IntegerType *i64_t = IntegerType::getInt64Ty(Context);
-      PointerType *ptr_t = PointerType::get(Context, 0);
-      ConstantInt *size = ConstantInt::get(i64_t, M.getDataLayout().getTypeAllocSize(ptr_t).getFixedValue());
-      Function *Alloc = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF");
-      CallInst *KernelError = CallInst::Create(Alloc->getFunctionType(), Alloc, {size, Allocator0, Allocator1, Allocator2});
-      KernelError->setCallingConv(CallingConv::Swift);
-      KernelError->insertBefore(CI);
-      new StoreInst(ConstantPointerNull::get(ptr_t), KernelError, CI);
-
-      // Update the calling instruction to our placeholder `parallel_for` to our
-      // kernel launcher. This assumes that the environment is set up correctly,
-      // which we will do in the next step.
-      std::vector<Value*> params = {Iterations, Context0, Context1, Context2, Stream, Kernel, Env, KernelError, ThrownError};
-      CallInst* CIpar = CallInst::Create(Fpar->getFunctionType(), Fpar, params);
-      CIpar->setCallingConv(CallingConv::Swift);
-      CIpar->addParamAttr(5, Attribute::NonNull);
-      CIpar->addParamAttr(5, Attribute::NoCapture);
-      CIpar->addParamAttr(5, Attribute::getWithDereferenceableBytes(Context, 32));
-      CIpar->addParamAttr(7, Attribute::NoAlias);
-      CIpar->addParamAttr(7, Attribute::NoCapture);
-      /* CIpar->addParamAttr(7, Attribute::SwiftError); */
-      CIpar->addParamAttr(7, Attribute::getWithDereferenceableBytes(Context, 8));
-      ReplaceInstWithInst(CI, CIpar);
-
-      // Free the temporary swifterror term passed to the kernel. See above TODO
-      Function *Free = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
-      CallInst *FreeI = CallInst::Create(Free->getFunctionType(), Free, {KernelError, CIpar, Allocator0, Allocator1, Allocator2});
-      FreeI->setCallingConv(CallingConv::Swift);
-      FreeI->insertAfter(CIpar);
-
-      // Update the closure environment so that its contents are accessible from the device
-      UpdateClosureEnvironment(Context, M, Body, Env, { Context0, Context1, Context2 }, { Allocator0, Allocator1, Allocator2 }, CIpar, CopyOnWriteMap);
+        for (auto ICS : IFI.InlinedCallSites) {
+          if (Fseq == ICS->getCalledFunction()) {
+            WorkQueue.push_back(ICS);
+          }
+        }
+      }
+      continue;
     }
+
+    // Extract the set of global functions that this kernel consists of. Also
+    // keep track of indirect functions that need to be specialised at the
+    // call site, as well as copy-on-write handlers that will be lifted out of
+    // the kernel into the closure environment setup phase.
+    SmallPtrSet<GlobalValue*, 16> GVs;
+    SmallPtrSet<GlobalValue*, 16> DeclOnlyGVs;
+    ValueToValueMapTy IndirectMap;
+    ValueToValueMapTy CopyOnWriteMap;
+    ExtractKernel(Context, CI, Body, Env, GVs, DeclOnlyGVs, IndirectMap, CopyOnWriteMap);
+
+    // Generate PTX assembly for the (set of) functions called by the
+    // `parallel_for` launcher, and embed the generated code into the module
+    ArrayRef<uint8_t> Obj = CreateKernel(Context, M, Body->getName(), GVs, DeclOnlyGVs, IndirectMap);
+    size_t buffer_size = Obj.size();
+    IntegerType* i8_t = IntegerType::getInt8Ty(Context);
+    ArrayType* image_t = ArrayType::get(i8_t, buffer_size);
+
+    std::vector<Constant*> KernelData(buffer_size);
+    std::transform(Obj.begin(), Obj.end(), KernelData.begin(), [&](uint8_t c) { return ConstantInt::get(i8_t, c); });
+    free((void*) Obj.data()); // ArrayRef does not own the underlying buffer
+
+    GlobalVariable* Image = new GlobalVariable(M, image_t, true, GlobalValue::InternalLinkage, ConstantArray::get(image_t, ArrayRef(KernelData)));
+    Image->setAlignment(Align(1));
+    Image->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
+
+    // Swift is kind of bonkers and wraps all data types as struct types,
+    GlobalVariable* Kernel = new GlobalVariable(M, kernel_t, false,
+        GlobalValue::InternalLinkage,
+        ConstantStruct::get(kernel_t,
+            { ConstantStruct::get(cast<StructType>(kernel_t->getElementType(0)), {Image})
+            , ConstantAggregateZero::get(kernel_t->getElementType(1))
+            , ConstantAggregateZero::get(kernel_t->getElementType(2))
+            , ConstantAggregateZero::get(kernel_t->getElementType(3))
+            , ConstantAggregateZero::get(kernel_t->getElementType(4))
+            }));
+    Kernel->setAlignment(Align(8));
+    Kernel->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
+
+    // Create temporary placeholders for the swifterror and throwerror terms
+    // that can be passed to the GPU kernel. These will need to be
+    // synchronised with the "real" swift error terms once the kernel
+    // completes, but most likely we'll have to wait until we have this marked
+    // as an 'async throws' function until that will work correctly.
+    IntegerType *i64_t = IntegerType::getInt64Ty(Context);
+    PointerType *ptr_t = PointerType::get(Context, 0);
+    ConstantInt *size = ConstantInt::get(i64_t, M.getDataLayout().getTypeAllocSize(ptr_t).getFixedValue());
+    Function *Alloc = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF");
+    CallInst *KernelError = CallInst::Create(Alloc->getFunctionType(), Alloc, {size, Allocator0, Allocator1, Allocator2});
+    KernelError->setCallingConv(CallingConv::Swift);
+    KernelError->insertBefore(CI);
+    new StoreInst(ConstantPointerNull::get(ptr_t), KernelError, CI);
+
+    // Update the calling instruction to our placeholder `parallel_for` to our
+    // kernel launcher. This assumes that the environment is set up correctly,
+    // which we will do in the next step.
+    std::vector<Value*> params = {Iterations, Context0, Context1, Context2, Stream, Kernel, Env, KernelError, ThrownError};
+    CallInst* CIpar = CallInst::Create(Fpar->getFunctionType(), Fpar, params);
+    CIpar->setCallingConv(CallingConv::Swift);
+    CIpar->addParamAttr(5, Attribute::NonNull);
+    CIpar->addParamAttr(5, Attribute::NoCapture);
+    CIpar->addParamAttr(5, Attribute::getWithDereferenceableBytes(Context, 32));
+    CIpar->addParamAttr(7, Attribute::NoAlias);
+    CIpar->addParamAttr(7, Attribute::NoCapture);
+    /* CIpar->addParamAttr(7, Attribute::SwiftError); */
+    CIpar->addParamAttr(7, Attribute::getWithDereferenceableBytes(Context, 8));
+    ReplaceInstWithInst(CI, CIpar);
+
+    // Free the temporary swifterror term passed to the kernel. See above TODO
+    Function *Free = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
+    CallInst *FreeI = CallInst::Create(Free->getFunctionType(), Free, {KernelError, CIpar, Allocator0, Allocator1, Allocator2});
+    FreeI->setCallingConv(CallingConv::Swift);
+    FreeI->insertAfter(CIpar);
+
+    // Update the closure environment so that its contents are accessible from the device
+    UpdateClosureEnvironment(Context, M, Body, Env, { Context0, Context1, Context2 }, { Allocator0, Allocator1, Allocator2 }, CIpar, CopyOnWriteMap);
   }
 
   Context.setDiscardValueNames(DiscardValueNames);
