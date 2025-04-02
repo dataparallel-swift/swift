@@ -804,18 +804,6 @@ ArrayRef<uint8_t> CreateKernel
   // the body of the function now, as well as enable floating point contraction
   // for compatible instructions and specialise any indirect function calls.
   for (auto I : GVs) {
-    // Copy any metadata
-    if (auto Src = dyn_cast<GlobalObject>(I)) {
-      GlobalObject* Dst = cast_if_present<GlobalObject>(VMap[Src]);
-      if (!Dst)
-        continue;
-
-      SmallVector<std::pair<unsigned, MDNode*>> MDs;
-      Src->getAllMetadata(MDs);
-      for (auto MD : MDs)
-        Dst->addMetadata(MD.first, *MapMetadata(MD.second, VMap));
-    }
-
     // If this is only a declaration, we are done
     if (I->isDeclaration())
       continue;
