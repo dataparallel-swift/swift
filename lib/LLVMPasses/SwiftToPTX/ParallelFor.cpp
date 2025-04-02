@@ -1155,7 +1155,18 @@ Value* getValueFromClosure(CallStack& CS, SmallVector<GetElementPtrInst*>& Indic
 // Entry point to peek through the closure environment looking for values that
 // were stored in it that we can specialise on (namely, indirect function
 // calls). Note that this version takes a copy of the callstack, so that we are
-// free to mutate it in the recursive invocation that does the actual work.
+// free to mutate it in the recursive invocations that do the actual work.
+//
+// TLM: I still don't think this is right. We have two pointers that we want to
+// walk down, one from the closure (callee) side, where we look for LOADs at some
+// GEP; and one from the parallel_for (caller) side, where we look for STOREs at
+// the corresponding GEP. Right now we walk up the entire call stack collecting
+// all the GEPs we find along the way, but I think this only works in the simple
+// case (no nested closures), and because we have an early exit if we encounter
+// a global value already. I think we should instead take a single "step" from
+// each end at a time, and keep going until we find a global value? But I'm not
+// sure if that is the correct stopping condition or not. ---TLM 2025-04-02
+//
 Value* getValueFromClosure(CallStack CS, Value* Env, Value* V)
 {
   SmallVector<GetElementPtrInst*> Indices;
