@@ -622,10 +622,6 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
     }
     StringRef msg = StringRef(msg_buffer, offset);
 
-    // Information about register usage etc. of the compiled kernel
-    if (Verbose)
-      errs() << msg;
-
     // Get the exit status of the process
     int status = 0;
     waitpid(pid, &status, 0);
@@ -640,6 +636,10 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
 
     // normal termination
     assert(status == 0);
+
+    // Information about register usage etc. of the compiled kernel
+    if (Verbose)
+      errs() << msg;
 
     LLVM_DEBUG(dbgs() << msg);
     free(msg_buffer);
@@ -740,12 +740,12 @@ ArrayRef<uint8_t> CreateKernel
       StringRef Name = Src->getName();
       StringRef Lib  = libdeviceFunctions.lookup(Name);
       if (!Lib.empty()) {
-          if (!HaveLibdevice) {
-            LinkInLibdeviceModule(*K, Context);
-            HaveLibdevice = true;
-          }
-          VMap[Src] = K->getFunction(Lib);
-          continue;
+        if (!HaveLibdevice) {
+          LinkInLibdeviceModule(*K, Context);
+          HaveLibdevice = true;
+        }
+        VMap[Src] = K->getFunction(Lib);
+        continue;
       }
 
       // Otherwise, this is just a regular function (declaration). Just make the
