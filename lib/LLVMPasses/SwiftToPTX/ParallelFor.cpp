@@ -248,21 +248,21 @@ attributes #1 = { sspreq "frame-pointer"="non-leaf" "no-trapping-math"="true" "s
 const StringMap<StringRef> libdeviceFunctions =
   /* {{"llvm.abs.i64",         "__nv_llabs"} */
   /* ,{"llvm.abs.i32",         "__nv_abs"} */
-  {{"llvm.smax.i64",        "__nv_llmax"}
-  ,{"llvm.smax.i32",        "__nv_max"}
-  ,{"llvm.smin.i64",        "__nv_llmin"}
-  ,{"llvm.smin.i32",        "__nv_min"}
-  ,{"llvm.umax.i64",        "__nv_ullmax"}
-  ,{"llvm.umax.i32",        "__nv_umax"}
-  ,{"llvm.umin.i64",        "__nv_ullmin"}
-  ,{"llvm.umin.i32",        "__nv_umin"}
+  /* ,{"llvm.smax.i64",        "__nv_llmax"} */
+  /* ,{"llvm.smax.i32",        "__nv_max"} */
+  /* ,{"llvm.smin.i64",        "__nv_llmin"} */
+  /* ,{"llvm.smin.i32",        "__nv_min"} */
+  /* ,{"llvm.umax.i64",        "__nv_ullmax"} */
+  /* ,{"llvm.umax.i32",        "__nv_umax"} */
+  /* ,{"llvm.umin.i64",        "__nv_ullmin"} */
+  /* ,{"llvm.umin.i32",        "__nv_umin"} */
   /* ,{"llvm.memcpy",          "" */
   /* ,{"llvm.memcpy.inline",   "" */
   /* ,{"llvm.memmove",         "" */
   /* ,{"llvm.memmove.inline",  "" */
   /* ,{"llvm.memset",          "" */
   /* ,{"llvm.memset.inline",   "" */
-  ,{"sqrt",                 "__nv_sqrt"}      /* ,{"llvm.sqrt.f64",        "__nv_sqrt"} */
+  {{"sqrt",                 "__nv_sqrt"}      /* ,{"llvm.sqrt.f64",        "__nv_sqrt"} */
   ,{"sqrtf",                "__nv_sqrtf"}     /* ,{"llvm.sqrt.f32",        "__nv_sqrtf"} */
   ,{"llvm.powi.f64.i32",    "__nv_powi"}
   ,{"llvm.powi.f32.i32",    "__nv_powif"}
@@ -277,7 +277,9 @@ const StringMap<StringRef> libdeviceFunctions =
   ,{"acos",                 "__nv_acos"}      /* ,{"llvm.acos.f64",        "__nv_acos"} */
   ,{"acosf",                "__nv_acosf"}     /* ,{"llvm.acos.f32",        "__nv_acosf"} */
   ,{"atan",                 "__nv_atan"}      /* ,{"llvm.atan.f64",        "__nv_atan"} */
-  ,{"atanf",                "__nv_atanf"}     /* ,{"llvm.atan.f32",        "__nv_tanf"} */
+  ,{"atanf",                "__nv_atanf"}     /* ,{"llvm.atan.f32",        "__nv_atanf"} */
+  ,{"atan2",                "__nv_atan2"}     /* ,{"llvm.atan2.f64",       "__nv_atan"} */
+  ,{"atan2f",               "__nv_atan2f"}    /* ,{"llvm.atan2.f32",       "__nv_atan2f"} */
   ,{"sinh",                 "__nv_sinh"}      /* ,{"llvm.sinh.f64",        "__nv_sinh"} */
   ,{"sinhf",                "__nv_sinhf"}     /* ,{"llvm.sinh.f32",        "__nv_sinhf"} */
   ,{"cosh",                 "__nv_cosh"}      /* ,{"llvm.cosh.f64",        "__nv_cosh"} */
@@ -328,8 +330,8 @@ const StringMap<StringRef> libdeviceFunctions =
   /* ,{"llvm.floor.f32",       "__nv_floorf"} */
   /* ,{"llvm.ceiling.f64",     "__nv_ceiling"} */
   /* ,{"llvm.ceiling.f32",     "__nv_ceilingf"} */
-  ,{"llvm.trunc.f64",       "__nv_trunc"}
-  ,{"llvm.trunc.f32",       "__nv_truncf"}
+  /* ,{"llvm.trunc.f64",       "__nv_trunc"} */
+  /* ,{"llvm.trunc.f32",       "__nv_truncf"} */
   ,{"llvm.rint.f64",        "__nv_rint"}
   ,{"llvm.rint.f32",        "__nv_rintf"}
   ,{"llvm.nearbyint.f64",   "__nv_nearbyint"}
@@ -360,6 +362,8 @@ const StringMap<StringRef> libdeviceFunctions =
   ,{"tgammaf",              "__nv_tgammaf"}
   ,{"lgamma_r",             "__nv_lgamma"}
   ,{"lgammaf_r",            "__nv_lgammaf"}
+  ,{"hypot",                "__nv_hypot"}
+  ,{"hypotf",               "__nv_hypotf"}
   };
 
 
