@@ -70,7 +70,7 @@ static cl::opt<StringRef> TargetFeatures (
 
 static cl::opt<bool> AllowFPArcp (
   "swift-to-ptx-allow-fp-arcp", cl::Hidden, cl::init(true),
-  cl::desc("Allow floating-point division to be treated as multiplication by a recriprocal"));
+  cl::desc("Allow floating-point division to be treated as multiplication by a reciprocal"));
 
 static cl::opt<bool> AllowFPContract (
   "swift-to-ptx-allow-fp-contract", cl::Hidden, cl::init(true),
