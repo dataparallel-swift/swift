@@ -82,7 +82,7 @@ static cl::opt<bool> AllowFPAfn (
 
 static cl::opt<bool> AllowFPReassoc (
   "swift-to-ptx-allow-fp-reassoc", cl::Hidden, cl::init(true),
-  cl::desc("Allow reassociation transformations for floating-point operations"));
+  cl::desc("Allow re-association transformations for floating-point operations"));
 
 static cl::opt<bool> StripDebugInfo (
   "swift-to-ptx-strip-debug-info", cl::Hidden, cl::init(false),
