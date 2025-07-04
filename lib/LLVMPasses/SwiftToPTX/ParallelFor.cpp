@@ -17,6 +17,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IRPrinter/IRPrintingPasses.h"
@@ -980,7 +981,7 @@ ArrayRef<uint8_t> CreateKernel
   legacy::PassManager legacy;
   SmallVector<char> Asm;  // XXX: reserve space to avoid growing too frequently?
   raw_svector_ostream ostream(Asm);
-  if (TargetMachine->addPassesToEmitFile(legacy, ostream, nullptr, CGFT_AssemblyFile)) {
+  if (TargetMachine->addPassesToEmitFile(legacy, ostream, nullptr, CodeGenFileType::AssemblyFile)) {
     report_fatal_error("could not create output stream", false);
   }
   legacy.run(*K);
