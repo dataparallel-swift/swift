@@ -55,6 +55,7 @@ static constexpr size_t MALLOC_ALIGN_MASK = alignof(std::max_align_t) - 1;
 #endif
 
 
+#if !defined(__wasm32__)
 /* Define ALIASNAME as a strong alias for NAME.  */
 #define strong_alias(name, aliasname) \
   extern __typeof (name) aliasname __attribute__ ((alias (#name))) \
@@ -65,6 +66,11 @@ static constexpr size_t MALLOC_ALIGN_MASK = alignof(std::max_align_t) - 1;
 #define weak_alias(name, aliasname) \
   extern __typeof (name) aliasname __attribute__ ((weak, alias (#name))) \
     __attribute_copy__ (name);
+
+#else
+#define strong_alias(name, aliasname)
+#define weak_alias(name, aliasname)
+#endif
 
 
 // This assert ensures that manually allocated memory always uses the
