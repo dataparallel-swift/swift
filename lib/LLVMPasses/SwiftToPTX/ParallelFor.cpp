@@ -1229,7 +1229,11 @@ void ExtractKernel (
                   continue;
 
                 if (auto I = dyn_cast<CallBase>(U)) {
-                  DeclOnlyGVs.insert(I->getCalledFunction());
+                  CF = I->getCalledFunction();
+                  if (!CF)
+                    continue;
+
+                  DeclOnlyGVs.insert(CF);
 
                   if (auto V = getValueFromClosure(CS, Env, Op)) {
                     // Clone the copy-on-write handler and update the arguments
