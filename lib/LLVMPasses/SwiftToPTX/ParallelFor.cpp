@@ -173,7 +173,7 @@ target triple = "aarch64-unknown-linux-gnu"
 %Ts5Int32V = type <{ i32 }>
 %Ts13OpaquePointerV = type <{ ptr }>
 %Ts13OpaquePointerVSg = type <{ [8 x i8] }>
-%T10SwiftToPTX17ParallelForKernelV = type <{ %TSP, %Ts13OpaquePointerVSg, %Ts13OpaquePointerV, %Ts5Int32V, %Ts5Int32V }>
+%T10SwiftToPTX17ParallelForKernelV = type <{ %TSP, %TSP, %Ts13OpaquePointerVSg, %Ts13OpaquePointerV, %Ts5Int32V, %Ts5Int32V }>
 
 ; SwiftToPTX.CachingHostAllocator.alloc(Swift.Int) -> Swift.UnsafeMutableRawPointer
 declare swiftcc ptr @"$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF"(i64, ptr, ptr, ptr) local_unnamed_addr #0
@@ -694,7 +694,8 @@ ArrayRef<uint8_t> CreateKernel
 (
     LLVMContext& Context,
     Module& M,
-    StringRef Main,
+    StringRef KernelName,
+    StringRef BodyName,
     SmallPtrSetImpl<GlobalValue*>& GVs,
     SmallPtrSetImpl<GlobalValue*>& DeclOnlyGVs,
     ValueToValueMapTy& IndirectMap
@@ -938,13 +939,18 @@ ArrayRef<uint8_t> CreateKernel
   if (StripDebugInfo)
     llvm::StripDebugInfo(*K);
 
+  // Update the kernel function name (so that we have more insight into what is
+  // being executed beyond in the profiler)
+  Function *Kernel = K->getFunction("parallel_for");
+  Kernel->setName(KernelName);
+
   // Update the kernel function to call the main (entry) function from the set
   // that we extracted in the previous step.
   Function *Body = K->getFunction("body");
   assert(Body->hasOneUser() && "expected only one call to the kernel body");
   assert(isa<CallInst>(Body->getUniqueUndroppableUser()));
   CallInst *CI = cast<CallInst>(Body->getUniqueUndroppableUser());
-  CI->setCalledOperand(K->getFunction(Main));
+  CI->setCalledOperand(K->getFunction(BodyName));
 
   // Create a target machine
   std::string Error;
@@ -1881,7 +1887,12 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
 
     // Generate PTX assembly for the (set of) functions called by the
     // `parallel_for` launcher, and embed the generated code into the module
-    ArrayRef<uint8_t> Obj = CreateKernel(Context, M, Body->getName(), GVs, DeclOnlyGVs, IndirectMap);
+    StringRef KernelName = "parallel_for";
+    if (auto Parent = CI->getFunction()) {
+      KernelName = Parent->getName();
+    }
+
+    ArrayRef<uint8_t> Obj = CreateKernel(Context, M, KernelName, Body->getName(), GVs, DeclOnlyGVs, IndirectMap);
     size_t buffer_size = Obj.size();
     IntegerType* i8_t = IntegerType::getInt8Ty(Context);
     ArrayType* image_t = ArrayType::get(i8_t, buffer_size);
@@ -1894,15 +1905,19 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
     Image->setAlignment(Align(1));
     Image->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
 
+    GlobalValue* Name = newStaticString(Context, M, KernelName.str());
+    Name->setLinkage(GlobalValue::InternalLinkage);
+
     // Swift is kind of bonkers and wraps all data types as struct types,
     GlobalVariable* Kernel = new GlobalVariable(M, kernel_t, false,
         GlobalValue::InternalLinkage,
         ConstantStruct::get(kernel_t,
             { ConstantStruct::get(cast<StructType>(kernel_t->getElementType(0)), {Image})
-            , ConstantAggregateZero::get(kernel_t->getElementType(1))
+            , ConstantStruct::get(cast<StructType>(kernel_t->getElementType(1)), {Name})
             , ConstantAggregateZero::get(kernel_t->getElementType(2))
             , ConstantAggregateZero::get(kernel_t->getElementType(3))
             , ConstantAggregateZero::get(kernel_t->getElementType(4))
+            , ConstantAggregateZero::get(kernel_t->getElementType(5))
             }));
     Kernel->setAlignment(Align(8));
     Kernel->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
