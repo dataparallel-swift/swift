@@ -657,6 +657,7 @@ std::optional<StringRef> getGlobalInitializerString(Value* Value)
 {
   std::optional<StringRef> R = {};
 
+  // This is a Swift StaticString
   if (auto C = dyn_cast<ConstantExpr>(Value)) {
     if (auto I = dyn_cast<PtrToIntInst>(C->getAsInstruction())) {
       if (auto G = dyn_cast<GlobalVariable>(I->getPointerOperand())) {
@@ -665,6 +666,23 @@ std::optional<StringRef> getGlobalInitializerString(Value* Value)
         }
       }
       delete I; // getAsInstruction() creates a parent-less instruction
+    }
+  }
+
+  // This was a constant Swift String that we still might be able to dig out as
+  // a StaticString.
+  if (auto P = dyn_cast<IntToPtrInst>(Value)) {
+    if (auto I = dyn_cast<BinaryOperator>(P->getOperand(0))) {
+      if (I->getOpcode() == BinaryOperator::Or) {
+        if (auto C = dyn_cast<ConstantExpr>(I->getOperand(0))) {
+          if (auto I2 = dyn_cast<BinaryOperator>(C->getAsInstruction())) {
+            if (I2->getOpcode() == BinaryOperator::Sub) {
+              R = getGlobalInitializerString(I2->getOperand(0));
+            }
+            delete I2; // as above
+          }
+        }
+      }
     }
   }
 
@@ -904,7 +922,9 @@ ArrayRef<uint8_t> CreateKernel
 #endif
 
   // Replace swift error handling functions with equivalents that we can call
-  // from the device
+  // from the device. These essentially result in a trap.
+
+  // Swift._fatalErrorMessage(_: Swift.StaticString, _: Swift.StaticString, file: Swift.StaticString, line: Swift.UInt, flags: Swift.UInt32) -> Swift.Never
   if (Function* _fatalErrorMessage = K->getFunction("$ss18_fatalErrorMessage__4file4line5flagss5NeverOs12StaticStringV_A2HSus6UInt32VtF")) {
     for (auto U = _fatalErrorMessage->user_begin(), UE = _fatalErrorMessage->user_end(); U != UE; ) {
       Value* V = *U++;
@@ -917,6 +937,31 @@ ArrayRef<uint8_t> CreateKernel
         auto Message = getGlobalInitializerString(CI->getArgOperand(3));
         auto File    = getGlobalInitializerString(CI->getArgOperand(6));
         auto Line    = cast<ConstantInt>(CI->getArgOperand(9))->getZExtValue();
+
+        auto __assertfail = K->getFunction("__assertfail");
+        CallInst* CINew = CallInst::Create(__assertfail->getFunctionType(), __assertfail,
+            { newStaticString(Context, *K, Prefix->str() + (Message ? ": " + Message->str() : ""))
+            , newStaticString(Context, *K, File->str())
+            , ConstantInt::get(IntegerType::getInt32Ty(Context), Line)
+            , newStaticString(Context, *K, demangleSymbolAsString(CI->getCaller()->getName(), swift::Demangle::DemangleOptions()))
+            , ConstantInt::get(IntegerType::getInt64Ty(Context), 1)
+            });
+
+        ReplaceInstWithInst(CI, CINew);
+      }
+    }
+  }
+
+  // Swift._assertionFailure(_: Swift.StaticString, _: Swift.String, file: Swift.StaticString, line: Swift.UInt, flags: Swift.UInt32) -> Swift.Never
+  if (Function* _assertionFailure = K->getFunction("$ss17_assertionFailure__4file4line5flagss5NeverOs12StaticStringV_SSAHSus6UInt32VtF")) {
+    for (auto U = _assertionFailure->user_begin(), UE = _assertionFailure->user_end(); U != UE; ) {
+      Value* V = *U++;
+
+      if (CallInst* CI = dyn_cast<CallInst>(V)) {
+        auto Prefix  = getGlobalInitializerString(CI->getArgOperand(0));
+        auto Message = getGlobalInitializerString(CI->getArgOperand(4));
+        auto File    = getGlobalInitializerString(CI->getArgOperand(5));
+        auto Line    = cast<ConstantInt>(CI->getArgOperand(8))->getZExtValue();
 
         auto __assertfail = K->getFunction("__assertfail");
         CallInst* CINew = CallInst::Create(__assertfail->getFunctionType(), __assertfail,
