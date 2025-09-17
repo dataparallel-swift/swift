@@ -85,9 +85,9 @@ static cl::opt<bool> AllowFPReassoc (
   "swift-to-ptx-allow-fp-reassoc", cl::Hidden, cl::init(true),
   cl::desc("Allow re-association transformations for floating-point operations"));
 
-static cl::opt<bool> StripDebugInfo (
-  "swift-to-ptx-strip-debug-info", cl::Hidden, cl::init(false),
-  cl::desc("Strip debug information from device code"));
+static cl::opt<bool> DeviceDebug (
+  "swift-to-ptx-device-debug", cl::Hidden, cl::init(false),
+  cl::desc("Generate debug information for device code"));
 
 static const MemoryBufferRef parallel_for_kernel = MemoryBufferRef(R"KERNEL(
 ; ModuleID = '<parallel_for_kernel>'
@@ -551,14 +551,19 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
     }
 
     // Replace the current process image. If this returns then an error has occurred.
-    const char* const argv[] =
+    const char* argv[] =
       { PTXASPath.data()
-      , "--verbose"
-      , "-arch", TargetGPU.data()
-      , "-o", "/dev/stdout"       // send the output to stdout pipe
       , "-"                       // read input from stdin pipe
+      , "-o", "/dev/stdout"       // send the output to stdout pipe
+      , "--verbose"
+      , "--gpu-name", TargetGPU.data()
+      , "--device-debug"
       , nullptr
       };
+
+    if (!DeviceDebug)
+      argv[7] = nullptr;
+
     execv(PTXASPath.data(), const_cast<char* const*>(argv));
     report_fatal_error("execv() failed (" + Twine(errno) + ")", false);
   }
@@ -981,8 +986,8 @@ ArrayRef<uint8_t> CreateKernel
   // combinations of Swift/CUDA due to bugs in LLVM. Debug information will only
   // be present if already enabled as part of the swift compilation pipeline
   // (default), it will not be generated as part of this plugin.
-  if (StripDebugInfo)
-    llvm::StripDebugInfo(*K);
+  if (!DeviceDebug)
+    StripDebugInfo(*K);
 
   // Update the kernel function name (so that we have more insight into what is
   // being executed beyond in the profiler)
