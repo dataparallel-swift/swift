@@ -94,29 +94,51 @@ static const MemoryBufferRef parallel_for_kernel = MemoryBufferRef(R"KERNEL(
 target datalayout = "e-i64:64-v16:16-v32:32-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
 
-; Function Attrs: argmemonly nofree nosync nounwind
-define void @parallel_for(i64 %iterations, ptr nonnull %env, ptr noalias nocapture swifterror dereferenceable(8) %swifterror, ptr nocapture readnone %thrownerror) local_unnamed_addr #0 {
+; Launch configuration: Fixed number of thread blocks
+; ; Function Attrs: argmemonly nofree nosync nounwind
+; define void @parallel_for(i64 noundef %iterations, ptr nonnull %env, ptr noalias nocapture swifterror dereferenceable(8) %swifterror, ptr nocapture readnone %thrownerror) local_unnamed_addr #0 {
+; entry:
+;   %0 = tail call i32 @llvm.nvvm.read.ptx.sreg.nctaid.x() #2
+;   %1 = tail call i32 @llvm.nvvm.read.ptx.sreg.ntid.x() #2
+;   %2 = mul i32 %1, %0
+;   %3 = sext i32 %2 to i64
+;   %4 = tail call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x() #2
+;   %5 = tail call i32 @llvm.nvvm.read.ptx.sreg.tid.x() #2
+;   %6 = mul i32 %4, %1
+;   %7 = add i32 %5, %6
+;   %8 = sext i32 %7 to i64
+;   %9 = icmp slt i64 %8, %iterations
+;   br i1 %9, label %while1.top, label %while1.exit
+;
+; while1.top:                                       ; preds = %entry, %while1.top
+;   %10 = phi i64 [ %11, %while1.top ], [ %8, %entry ]
+;   call swiftcc void @body(i64 %10, ptr nonnull %env, ptr noalias nocapture swifterror dereferenceable(8) %swifterror, ptr nocapture readnone %thrownerror)
+;   %11 = add i64 %10, %3
+;   %12 = icmp slt i64 %11, %iterations
+;   br i1 %12, label %while1.top, label %while1.exit
+;
+; while1.exit:                                      ; preds = %while1.top, %entry
+;   ret void
+; }
+
+; Launch configuration: Fixed work per thread
+; Function Attrs: convergent mustprogress norecurse nounwind
+define void @parallel_for(i64 noundef %iterations, ptr nonnull %env, ptr noalias nocapture swifterror dereferenceable(8) %swifterror, ptr nocapture readnone %thrownerror) local_unnamed_addr #0 {
 entry:
-  %0 = tail call i32 @llvm.nvvm.read.ptx.sreg.nctaid.x() #2
-  %1 = tail call i32 @llvm.nvvm.read.ptx.sreg.ntid.x() #2
-  %2 = mul i32 %1, %0
-  %3 = sext i32 %2 to i64
-  %4 = tail call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x() #2
-  %5 = tail call i32 @llvm.nvvm.read.ptx.sreg.tid.x() #2
-  %6 = mul i32 %4, %1
-  %7 = add i32 %5, %6
-  %8 = sext i32 %7 to i64
-  %9 = icmp slt i64 %8, %iterations
-  br i1 %9, label %while1.top, label %while1.exit
+  %0 = tail call noundef range(i32 0, 2147483647) i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %1 = tail call noundef range(i32 1, 1025) i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %2 = mul i32 %0, %1
+  %3 = tail call noundef range(i32 0, 1024) i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %4 = add i32 %2, %3
+  %5 = sext i32 %4 to i64
+  %6 = icmp slt i64 %5, %iterations
+  br i1 %6, label %if.then, label %if.end
 
-while1.top:                                       ; preds = %entry, %while1.top
-  %10 = phi i64 [ %11, %while1.top ], [ %8, %entry ]
-  call swiftcc void @body(i64 %10, ptr nonnull %env, ptr noalias nocapture swifterror dereferenceable(8) %swifterror, ptr nocapture readnone %thrownerror)
-  %11 = add i64 %10, %3
-  %12 = icmp slt i64 %11, %iterations
-  br i1 %12, label %while1.top, label %while1.exit
+if.then:                                          ; preds = %entry
+  tail call swiftcc void @body(i64 noundef %5, ptr nonnull %env, ptr noalias nocapture swifterror dereferenceable(8) %swifterror, ptr nocapture readnone %thrownerror) #3
+  br label %if.end
 
-while1.exit:                                      ; preds = %while1.top, %entry
+if.end:                                           ; preds = %if.then, %entry
   ret void
 }
 
@@ -133,16 +155,16 @@ define internal void @nanosleep(i32 %0) {
   ret void
 }
 
-; Function Attrs: nofree nosync nounwind readnone
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i32 @llvm.nvvm.read.ptx.sreg.ctaid.x() #1
 
-; Function Attrs: nofree nosync nounwind readnone
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i32 @llvm.nvvm.read.ptx.sreg.tid.x() #1
 
-; Function Attrs: nofree nosync nounwind readnone
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i32 @llvm.nvvm.read.ptx.sreg.nctaid.x() #1
 
-; Function Attrs: nofree nosync nounwind readnone
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
 declare i32 @llvm.nvvm.read.ptx.sreg.ntid.x() #1
 
 ; Function Attrs: convergent nounwind
@@ -153,8 +175,8 @@ declare void @__assertfail(ptr noundef, ptr noundef, i32 noundef, ptr noundef, i
 ;                           │            ╰───────────────────────────────────────────── file name
 ;                           ╰────────────────────────────────────────────────────────── message
 
-attributes #0 = { argmemonly nofree nosync nounwind }
-attributes #1 = { nofree nosync nounwind readnone }
+attributes #0 = { convergent mustprogress norecurse nounwind }
+attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
 attributes #2 = { nounwind readnone }
 attributes #3 = { convergent nounwind }
 
@@ -1891,7 +1913,7 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
     Value* Iterations = CI->getArgOperand(0);
     Value* Context0 = CI->getArgOperand(1);   // CUcontext
     Value* Context1 = CI->getArgOperand(2);   // { cuDevice, multiProcessorCount }
-    Value* Context2 = CI->getArgOperand(3);   // { maxThreadsPerMultiprocessor, warpSize }
+    Value* Context2 = CI->getArgOperand(3);   // { maxThreadsPerMultiprocessor, maxBlocksPerMultiprocessor }
     Value* Allocator0 = CI->getArgOperand(4); // bin_size_bytes
     Value* Allocator1 = CI->getArgOperand(5); // cached_blocks
     Value* Allocator2 = CI->getArgOperand(6); // live_blocks
