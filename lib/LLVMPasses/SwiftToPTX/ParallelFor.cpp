@@ -94,6 +94,8 @@ static const MemoryBufferRef parallel_for_kernel = MemoryBufferRef(R"KERNEL(
 target datalayout = "e-i64:64-v16:16-v32:32-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
 
+; SECTION: Skeleton
+
 ; Launch configuration: Fixed number of thread blocks
 ; ; Function Attrs: argmemonly nofree nosync nounwind
 ; define void @parallel_for(i64 noundef %iterations, ptr nonnull %env, ptr noalias nocapture swifterror dereferenceable(8) %swifterror, ptr nocapture readnone %thrownerror) local_unnamed_addr #0 {
@@ -143,6 +145,57 @@ if.end:                                           ; preds = %if.then, %entry
 }
 
 define internal swiftcc void @body(i64 %0, ptr nonnull %1, ptr noalias nocapture swifterror dereferenceable(8) %2, ptr nocapture readnone %3) {
+  ret void
+}
+
+
+; SECTION: Exclusivity checking (TODO)
+
+define internal void @swift_beginAccess(ptr, ptr, i64, ptr) {
+  ret void
+}
+
+define internal void @swift_endAccess(ptr) {
+  ret void
+}
+
+; SECTION: Reference counting (TODO)
+
+define internal ptr @swift_retain(ptr returned %0) {
+entry:
+  %1 = call ptr @swift_retain_n(ptr returned %0, i32 1)
+  ret ptr %1
+}
+
+define internal ptr @swift_retain_n(ptr returned %0, i32) {
+  ret ptr %0
+}
+
+define internal void @swift_release(ptr %0) {
+  call void @swift_release_n(ptr %0, i32 1)
+  ret void
+}
+
+define internal void @swift_release_n(ptr, i32) {
+  ret void
+}
+
+define internal ptr @swift_bridgeObjectRetain(ptr returned %0) {
+entry:
+  %1 = call ptr @swift_bridgeObjectRetain_n(ptr returned %0, i32 1)
+  ret ptr %1
+}
+
+define internal ptr @swift_bridgeObjectRetain_n(ptr returned %0, i32) {
+  ret ptr %0
+}
+
+define internal void @swift_bridgeObjectRelease(ptr %0) {
+  call void @swift_bridgeObjectRelease_n(ptr %0, i32 1)
+  ret void
+}
+
+define internal void @swift_bridgeObjectRelease_n(ptr, i32) {
   ret void
 }
 
@@ -392,6 +445,12 @@ const StringMap<StringRef> libdeviceFunctions =
 
 const StringMap<StringRef> stubFunctions =
   {{"swift_isUniquelyReferenced_nonNull_native",  "swift_isUniquelyReferenced_nonNull_native"}
+  ,{"swift_beginAccess",                          "swift_beginAccess"}
+  ,{"swift_endAccess",                            "swift_endAccess"}
+  ,{"swift_retain",                               "swift_retain"}
+  ,{"swift_release",                              "swift_release"}
+  ,{"swift_bridgeObjectRetain",                   "swift_bridgeObjectRetain"}
+  ,{"swift_bridgeObjectRelease",                  "swift_bridgeObjectRelease"}
   ,{"$s10SwiftToPTX9nanosleepyys6UInt32VF",       "nanosleep"}
   };
 
