@@ -250,24 +250,24 @@ target triple = "aarch64-unknown-linux-gnu"
 %Ts13OpaquePointerVSg = type <{ [8 x i8] }>
 %T10SwiftToPTX17ParallelForKernelV = type <{ %TSP, %TSP, %Ts13OpaquePointerVSg, %Ts13OpaquePointerV, %Ts5Int32V, %Ts5Int32V }>
 
-; SwiftToPTX.CachingHostAllocator.alloc(Swift.Int) -> Swift.UnsafeMutableRawPointer
-declare swiftcc ptr @"$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF"(i64, ptr, ptr, ptr) local_unnamed_addr #0
-;                                                                         │    ╰────┬────╯
-;                                                                         │         ╰───────── SwiftToPTX.CachingHostAllocator
-;                                                                         ╰─────────────────── size in bytes
+; $s10PTXBackend20CachingHostAllocatorV5allocySvSiF ---> PTXBackend.CachingHostAllocator.alloc(Swift.Int) -> Swift.UnsafeMutableRawPointer
+declare swiftcc ptr @"$s10PTXBackend20CachingHostAllocatorV5allocySvSiF"(
+    i64,                    ; size in bytes
+    ptr, ptr, ptr           ; PTXBackend.CachingHostAllocator
+  ) local_unnamed_addr #0
 
-; SwiftToPTX.CachingHostAllocator.free(Swift.UnsafeMutableRawPointer, SwiftToPTX.Event) -> ()
-declare swiftcc void @"$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF"(ptr, ptr, ptr, ptr, ptr) local_unnamed_addr #0
-;                                                                                   │    │    ╰────┬────╯
-;                                                                                   │    │         ╰───────── SwiftToPTX.CachingHostAllocator
-;                                                                                   │    ╰─────────────────── ready event
-;                                                                                   ╰──────────────────────── pointer to free
+; $s10PTXBackend20CachingHostAllocatorV4freeyySv_AA8PTXEventCtF ---> PTXBackend.CachingHostAllocator.free(Swift.UnsafeMutableRawPointer, PTXBackend.PTXEvent) -> ()
+declare swiftcc void @"$s10PTXBackend20CachingHostAllocatorV4freeyySv_AA8PTXEventCtF"(
+    ptr,                    ; pointer to free
+    ptr,                    ; ready event
+    ptr, ptr, ptr           ; PTXBackend.CachingHostAllocator
+  ) local_unnamed_addr #0
 
-; SwiftToPTX.parallel_for<A where A: Swift.Error>(iterations: Swift.Int, context: SwiftToPTX.Context, allocator: SwiftToPTX.CachingHostAllocator, stream: SwiftToPTX.Stream, _: (Swift.Int) throws(A) -> ()) throws(A) -> SwiftToPTX.Event
-declare swiftcc ptr @"$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventCSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySixYKXEtxYKs5ErrorRzlF"(
+; $s10PTXBackend12parallel_for10iterations7context9allocator6stream_AA8PTXEventCSi_AA10PTXContextVAA20CachingHostAllocatorVAA9PTXStreamVySixYKXEtxYKs5ErrorRzlF ---> PTXBackend.parallel_for<A where A: Swift.Error>(iterations: Swift.Int, context: PTXBackend.PTXContext, allocator: PTXBackend.CachingHostAllocator, stream: PTXBackend.PTXStream, _: (Swift.Int) throws(A) -> ()) throws(A) -> PTXBackend.PTXEvent
+declare swiftcc ptr @"$s10PTXBackend12parallel_for10iterations7context9allocator6stream_AA8PTXEventCSi_AA10PTXContextVAA20CachingHostAllocatorVAA9PTXStreamVySixYKXEtxYKs5ErrorRzlF"(
     i64,                                                  ; iterations
-    ptr, i64, i64,                                        ; SwiftToPTX.Context
-    ptr, ptr, ptr,                                        ; SwiftToPTX.CachingHostAllocator
+    ptr, i64, i64,                                        ; PTXBackend.Context
+    ptr, ptr, ptr,                                        ; PTXBackend.CachingHostAllocator
     ptr,                                                  ; execution stream
     ptr,                                                  ; body of the parallel_for loop
     ptr,                                                  ; closure environment
@@ -275,22 +275,22 @@ declare swiftcc ptr @"$s10SwiftToPTX12parallel_for10iterations7context9allocator
     ptr,                                                  ; protocol witness table for A
     ptr swiftself,                                        ; swift self
     ptr noalias nocapture swifterror dereferenceable(8),  ; swift error
-    ptr nocapture readnone                                ; thrown error
-  ) local_unnamed_addr #0
+    ptr                                                   ; thrown error
+  ) local_unnamed_addr #1
 
-; SwiftToPTX.launch_parallel_for(iterations: Swift.Int, context: SwiftToPTX.Context, stream: SwiftToPTX.Stream, kernel: inout SwiftToPTX.ParallelForKernel, env: Swift.UnsafeMutableRawPointer, swifterror: Swift.UnsafeMutableRawPointer, thrownerror: Swift.UnsafeMutableRawPointer) -> SwiftToPTX.Event
-declare swiftcc ptr @"$s10SwiftToPTX19launch_parallel_for10iterations7context6stream6kernel3env10swifterror11thrownerrorAA5EventCSi_AA7ContextVAA6StreamVAA17ParallelForKernelVzS3vtF"(
+; $s10PTXBackend19launch_parallel_for10iterations7context6stream6kernel3env10swifterror11thrownerrorAA8PTXEventCSi_AA10PTXContextVAA9PTXStreamVAA17ParallelForKernelVzS3vtF ---> PTXBackend.launch_parallel_for(iterations: Swift.Int, context: PTXBackend.PTXContext, stream: PTXBackend.PTXStream, kernel: inout PTXBackend.ParallelForKernel, env: Swift.UnsafeMutableRawPointer, swifterror: Swift.UnsafeMutableRawPointer, thrownerror: Swift.UnsafeMutableRawPointer) -> PTXBackend.PTXEvent
+declare swiftcc ptr @"$s10PTXBackend19launch_parallel_for10iterations7context6stream6kernel3env10swifterror11thrownerrorAA8PTXEventCSi_AA10PTXContextVAA9PTXStreamVAA17ParallelForKernelVzS3vtF"(
     i64,                                                  ; iterations
-    ptr, i64, i64,                                        ; SwiftToPTX.Context
+    ptr, i64, i64,                                        ; PTXBackend.Context
     ptr,                                                  ; execution stream
-    ptr nocapture dereferenceable(32),                    ; SwiftToPTX.ParallelForKernel struct
+    ptr nocapture dereferenceable(40),                    ; PTXBackend.ParallelForKernel struct
     ptr,                                                  ; closure environment (updated to be accessible from the GPU)
-    ptr noalias nocapture dereferenceable(8),             ; swift error (passed to kernel)
-    ptr nocapture readnone                                ; thrown error (passed to kernel)
-  ) local_unnamed_addr #0
+    ptr,                                                  ; swift error (passed to the kernel)
+    ptr                                                   ; thrown error (passed to the kernel)
+  ) local_unnamed_addr #1
 
 attributes #0 = { "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
-attributes #1 = { sspreq "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
+attributes #1 = { noinline "frame-pointer"="non-leaf" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="generic" "target-features"="+neon,+outline-atomics,+v8a" }
 
 !llvm.module.flags = !{!0, !1, !2, !3, !4, !5, !6, !7}
 
@@ -1623,7 +1623,7 @@ void UpdateClosureEnvironment (
     // Convert from stack to pinned heap allocation
     IntegerType *i64_t = IntegerType::getInt64Ty(Context);
     ConstantInt *size = ConstantInt::get(i64_t, TypeSize->getFixedValue());
-    Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF");
+    Function *F = M.getFunction("$s10PTXBackend20CachingHostAllocatorV5allocySvSiF");
     CallInst *NewI = CallInst::Create(F->getFunctionType(), F, {size, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
     NewI->setCallingConv(CallingConv::Swift);
     ReplaceInstWithInst(I, NewI);
@@ -1640,7 +1640,7 @@ void UpdateClosureEnvironment (
             if (auto Restore = dyn_cast<CallInst>(U)) {
               assert(Restore->getCalledFunction()->getName() == "llvm.stackrestore");
 
-              Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
+              Function *F = M.getFunction("$s10PTXBackend20CachingHostAllocatorV4freeyySv_AA8PTXEventCtF");
               CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
               Free->setCallingConv(CallingConv::Swift);
               Free->insertAfter(Restore);
@@ -1721,7 +1721,7 @@ void UpdateClosureEnvironment (
       else if (Name.starts_with("llvm.lifetime.end")) {
         // Assume that we will encounter the corresponding .start()
         Value *Alloca = I->getArgOperand(1);
-        Function *F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
+        Function *F = M.getFunction("$s10PTXBackend20CachingHostAllocatorV4freeyySv_AA8PTXEventCtF");
         CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
         Free->setCallingConv(CallingConv::Swift);
         Free->insertAfter(I);
@@ -1793,7 +1793,7 @@ void UpdateClosureEnvironment (
     }
 
     assert(Returns.size() == 1 && "Expected function with single 'ret' instruction. Run pass 'mergereturn'?");
-    Function* F = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
+    Function* F = M.getFunction("$s10PTXBackend20CachingHostAllocatorV4freeyySv_AA8PTXEventCtF");
     Instruction *Ret = Returns.front();
     for (auto *Alloca : ToFree) {
       CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
@@ -1931,9 +1931,9 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
   LLVMContext &Context = M.getContext();
 
   // Find all use sites of the `parallel_for` function.
-  Function* Fseq = M.getFunction("$s10SwiftToPTX12parallel_for10iterations7context9allocator6stream_AA5EventCSi_AA7ContextVAA20CachingHostAllocatorVAA6StreamVySixYKXEtxYKs5ErrorRzlF");
+  Function* Fseq = M.getFunction("$s10PTXBackend12parallel_for10iterations7context9allocator6stream_AA8PTXEventCSi_AA10PTXContextVAA20CachingHostAllocatorVAA9PTXStreamVySixYKXEtxYKs5ErrorRzlF");
   if (!Fseq) {
-    LLVM_DEBUG(dbgs() << "No uses of function `SwiftToPTX.parallel_for()` found in this module\n");
+    LLVM_DEBUG(dbgs() << "No uses of function `SwiftToGPU.parallel_for()` found in this module\n");
     return PreservedAnalyses::all();
   }
 
@@ -1952,7 +1952,7 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
   // a parallel GPU kernel. First, add all the necessary host-side support code.
   LinkInHostSupportCode(M, Context);
 
-  Function* Fpar = M.getFunction("$s10SwiftToPTX19launch_parallel_for10iterations7context6stream6kernel3env10swifterror11thrownerrorAA5EventCSi_AA7ContextVAA6StreamVAA17ParallelForKernelVzS3vtF");
+  Function* Fpar = M.getFunction("$s10PTXBackend19launch_parallel_for10iterations7context6stream6kernel3env10swifterror11thrownerrorAA8PTXEventCSi_AA10PTXContextVAA9PTXStreamVAA17ParallelForKernelVzS3vtF");
   StructType* kernel_t = StructType::getTypeByName(Context, "T10SwiftToPTX17ParallelForKernelV");
 
   // We may encounter functions that need to be inlined into their callsite so
@@ -2061,7 +2061,7 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
     IntegerType *i64_t = IntegerType::getInt64Ty(Context);
     PointerType *ptr_t = PointerType::get(Context, 0);
     ConstantInt *size = ConstantInt::get(i64_t, M.getDataLayout().getTypeAllocSize(ptr_t).getFixedValue());
-    Function *Alloc = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV5allocySvSiF");
+    Function *Alloc = M.getFunction("$s10PTXBackend20CachingHostAllocatorV5allocySvSiF");
     CallInst *KernelError = CallInst::Create(Alloc->getFunctionType(), Alloc, {size, Allocator0, Allocator1, Allocator2});
     KernelError->setCallingConv(CallingConv::Swift);
     KernelError->insertBefore(CI);
@@ -2083,7 +2083,7 @@ PreservedAnalyses swift::ParallelForPass::run(Module &M, ModuleAnalysisManager &
     ReplaceInstWithInst(CI, CIpar);
 
     // Free the temporary swifterror term passed to the kernel. See above TODO
-    Function *Free = M.getFunction("$s10SwiftToPTX20CachingHostAllocatorV4freeyySv_AA5EventCtF");
+    Function *Free = M.getFunction("$s10PTXBackend20CachingHostAllocatorV4freeyySv_AA8PTXEventCtF");
     CallInst *FreeI = CallInst::Create(Free->getFunctionType(), Free, {KernelError, CIpar, Allocator0, Allocator1, Allocator2});
     FreeI->setCallingConv(CallingConv::Swift);
     FreeI->insertAfter(CIpar);
