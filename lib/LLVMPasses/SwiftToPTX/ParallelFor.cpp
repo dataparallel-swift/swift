@@ -1632,13 +1632,13 @@ void UpdateClosureEnvironment (
     // Determine how to (asynchronously) free the memmory
     // [Free 1]: Check for an llvm.stacksave() instruction
     if (auto Prev = NewI->getPrevNonDebugInstruction()) {
-      if (auto Save = dyn_cast<CallInst>(Prev)) {
-        if (Save->getCalledFunction()->getName() == "llvm.stacksave") {
+      if (auto *Save = dyn_cast<IntrinsicInst>(Prev)) {
+        if (Save->getIntrinsicID() == Intrinsic::stacksave) {
           // We can have multiple terminating blocks of the function when throwing
           // functions are involved
           for (auto U : Save->users()) {
-            if (auto Restore = dyn_cast<CallInst>(U)) {
-              assert(Restore->getCalledFunction()->getName() == "llvm.stackrestore");
+            if (auto Restore = dyn_cast<IntrinsicInst>(U)) {
+              assert(Restore->getIntrinsicID() == Intrinsic::stackrestore);
 
               Function *F = M.getFunction("$s10PTXBackend20CachingHostAllocatorV4freeyySv_AA8PTXEventCtF");
               CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
@@ -1712,13 +1712,13 @@ void UpdateClosureEnvironment (
   // lifetimes---will be replaced with calls to our caching pinned (heap) memory
   // allocator.
   else if (CallInst *I = dyn_cast<CallInst>(P)) {
-    if (Function* F = I->getCalledFunction()) {
-      StringRef Name = F->getName();
-      if (Name.starts_with("llvm.lifetime.start")) {
+    if (auto *II = dyn_cast<IntrinsicInst>(I)) {
+      auto IID = II->getIntrinsicID();
+      if (IID == Intrinsic::lifetime_start) {
         // Assume that we will encounter the corresponding .end()
         ToErase.insert(I);
       }
-      else if (Name.starts_with("llvm.lifetime.end")) {
+      else if (IID == Intrinsic::lifetime_end) {
         // Assume that we will encounter the corresponding .start()
         Value *Alloca = I->getArgOperand(1);
         Function *F = M.getFunction("$s10PTXBackend20CachingHostAllocatorV4freeyySv_AA8PTXEventCtF");
