@@ -1601,6 +1601,7 @@ void UpdateClosureEnvironment (
 // of indirection. XXX: Check this, it may have more structure than this,
 // especially now that we don't need to do address rewriting.
 //
+template<unsigned N>
 void UpdateClosureEnvironment (
     LLVMContext& Context,
     Module& M,
@@ -1609,7 +1610,7 @@ void UpdateClosureEnvironment (
     CUDAContext CUDA,
     CachingHostAllocator Allocator,
     Value* Event,
-    SmallPtrSetImpl<Instruction*>& ToErase,
+    SmallSetVector<Instruction*, N>& ToErase,
     SmallPtrSetImpl<Value*>& ToFree
 )
 {
@@ -1654,16 +1655,16 @@ void UpdateClosureEnvironment (
     ReplaceInstWithInst(I, NewI);
     ToFree.insert(NewI);
 
-    // Determine how to (asynchronously) free the memmory
+    // Determine how to (asynchronously) free the memory
     // [Free 1]: Check for an llvm.stacksave() instruction
     if (auto Prev = NewI->getPrevNonDebugInstruction()) {
-      if (auto Save = dyn_cast<CallInst>(Prev)) {
-        if (Save->getCalledFunction()->getName() == "llvm.stacksave") {
+      if (auto Save = dyn_cast<IntrinsicInst>(Prev)) {
+        if (Save->getIntrinsicID() == Intrinsic::stacksave) {
           // We can have multiple terminating blocks of the function when throwing
           // functions are involved
           for (auto U : Save->users()) {
-            if (auto Restore = dyn_cast<CallInst>(U)) {
-              assert(Restore->getCalledFunction()->getName() == "llvm.stackrestore");
+            if (auto Restore = dyn_cast<IntrinsicInst>(U)) {
+              assert(Restore->getIntrinsicID() == Intrinsic::stackrestore);
 
               Function *F = M.getFunction("$s10PTXBackend20CachingHostAllocatorV4freeyySv_AA8PTXEventCtF");
               CallInst *Free = CallInst::Create(F->getFunctionType(), F, {NewI, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
@@ -1736,23 +1737,21 @@ void UpdateClosureEnvironment (
   // Calls to llvm.lifetime.{start,end}---which manage stack allocation
   // lifetimes---will be replaced with calls to our caching pinned (heap) memory
   // allocator.
-  else if (CallInst *I = dyn_cast<CallInst>(P)) {
-    if (Function* F = I->getCalledFunction()) {
-      StringRef Name = F->getName();
-      if (Name.starts_with("llvm.lifetime.start")) {
+  else if (CallInst *I = dyn_cast<IntrinsicInst>(P)) {
+    auto IID = I->getIntrinsicID();
+    if (IID == Intrinsic::lifetime_start) {
         // Assume that we will encounter the corresponding .end()
         ToErase.insert(I);
-      }
-      else if (Name.starts_with("llvm.lifetime.end")) {
-        // Assume that we will encounter the corresponding .start()
-        Value *Alloca = I->getArgOperand(1);
-        Function *F = M.getFunction("$s10PTXBackend20CachingHostAllocatorV4freeyySv_AA8PTXEventCtF");
-        CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
-        Free->setCallingConv(CallingConv::Swift);
-        Free->insertAfter(I);
-        ToFree.erase(Alloca);
-        ToErase.insert(I);
-      }
+    }
+    else if (IID == Intrinsic::lifetime_end) {
+      // Assume that we will encounter the corresponding .start()
+      Value *Alloca = I->getArgOperand(1);
+      Function *F = M.getFunction("$s10PTXBackend20CachingHostAllocatorV4freeyySv_AA8PTXEventCtF");
+      CallInst *Free = CallInst::Create(F->getFunctionType(), F, {Alloca, Event, get<0>(Allocator), get<1>(Allocator), get<2>(Allocator)});
+      Free->setCallingConv(CallingConv::Swift);
+      Free->insertAfter(I);
+      ToFree.erase(Alloca);
+      ToErase.insert(I);
     }
   }
 
@@ -1781,7 +1780,7 @@ void UpdateClosureEnvironment (
     ValueToValueMapTy& CopyOnWriteMap
 )
 {
-  SmallPtrSet<Instruction*, 8> ToErase;
+  SmallSetVector<Instruction*, 8> ToErase;
   SmallPtrSet<Value*, 8> ToFree;
   Function *Parent = cast<Instruction>(Env)->getFunction();
 
