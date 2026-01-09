@@ -1038,6 +1038,31 @@ ArrayRef<uint8_t> CreateKernel
     }
   }
 
+  // Swift._assertionFailure(_: Swift.StaticString, _: Swift.StaticString, file: Swift.StaticString, line: Swift.UInt, flags: Swift.UInt32) -> Swift.Never
+  if (Function* _assertionFailure = K->getFunction("$ss17_assertionFailure__4file4line5flagss5NeverOs12StaticStringV_A2HSus6UInt32VtF")) {
+    for (auto U = _assertionFailure->user_begin(), UE = _assertionFailure->user_end(); U != UE; ) {
+      Value* V = *U++;
+
+      if (CallInst* CI = dyn_cast<CallInst>(V)) {
+        auto Prefix  = getGlobalInitializerString(CI->getArgOperand(0));
+        auto Message = getGlobalInitializerString(CI->getArgOperand(3));
+        auto File    = getGlobalInitializerString(CI->getArgOperand(6));
+        auto Line    = cast<ConstantInt>(CI->getArgOperand(9))->getZExtValue();
+
+        auto __assertfail = K->getFunction("__assertfail");
+        CallInst* CINew = CallInst::Create(__assertfail->getFunctionType(), __assertfail,
+            { newStaticString(Context, *K, Prefix->str() + (Message ? ": " + Message->str() : ""))
+            , newStaticString(Context, *K, File->str())
+            , ConstantInt::get(IntegerType::getInt32Ty(Context), Line)
+            , newStaticString(Context, *K, demangleSymbolAsString(CI->getCaller()->getName(), swift::Demangle::DemangleOptions()))
+            , ConstantInt::get(IntegerType::getInt64Ty(Context), 1)
+            });
+
+        ReplaceInstWithInst(CI, CINew);
+      }
+    }
+  }
+
   // Swift._assertionFailure(_: Swift.StaticString, _: Swift.String, file: Swift.StaticString, line: Swift.UInt, flags: Swift.UInt32) -> Swift.Never
   if (Function* _assertionFailure = K->getFunction("$ss17_assertionFailure__4file4line5flagss5NeverOs12StaticStringV_SSAHSus6UInt32VtF")) {
     for (auto U = _assertionFailure->user_begin(), UE = _assertionFailure->user_end(); U != UE; ) {
