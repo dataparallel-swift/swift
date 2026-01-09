@@ -595,7 +595,7 @@ ArrayRef<uint8_t> CompileKernel(SmallVector<char> Asm)
   int fd1[2]; // stdout
   int fd2[2]; // stderr
 
-  if ( pipe(fd0) < 0 || pipe(fd1) < 0 || pipe(fd2) < 0) {
+  if (pipe(fd0) < 0 || pipe(fd1) < 0 || pipe(fd2) < 0) {
     report_fatal_error("pipe() error", false);
   }
 
