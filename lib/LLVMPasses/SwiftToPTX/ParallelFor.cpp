@@ -451,7 +451,7 @@ const StringMap<StringRef> stubFunctions =
   ,{"swift_release",                              "swift_release"}
   ,{"swift_bridgeObjectRetain",                   "swift_bridgeObjectRetain"}
   ,{"swift_bridgeObjectRelease",                  "swift_bridgeObjectRelease"}
-  ,{"$s10SwiftToPTX9nanosleepyys6UInt32VF",       "nanosleep"}
+  ,{"$s10SwiftToGPU9nanosleepyys6UInt32VF",       "nanosleep"}
   };
 
 
