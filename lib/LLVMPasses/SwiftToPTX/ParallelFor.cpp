@@ -1780,9 +1780,13 @@ void UpdateClosureEnvironment (
     ValueToValueMapTy& CopyOnWriteMap
 )
 {
+  Instruction *I = dyn_cast<Instruction>(Env);
+  if (!I) {
+    return;
+  }
+  Function *Parent = I->getFunction();
   SmallSetVector<Instruction*, 8> ToErase;
   SmallPtrSet<Value*, 8> ToFree;
-  Function *Parent = cast<Instruction>(Env)->getFunction();
 
   // Lift any copy-on-write handlers out of the kernel body
   UpdateClosureEnvironment(Context, M, Env, CopyOnWriteMap);
